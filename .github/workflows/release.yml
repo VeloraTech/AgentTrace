@@ -102,16 +102,16 @@ jobs:
           node scripts/verify-package.js --all-platforms
       - name: Verify npm package ownership if name is already claimed
         run: |
-          if repository="$(npm view @coachlogic/agenttrace repository.url --json 2>&1)"; then
-            repository="$(node -p 'JSON.parse(process.argv[1])' "$repository")"
+          if npm view @coachlogic/agenttrace repository.url > dist/npm-repository.txt 2> dist/npm-view.log; then
+            repository="$(cat dist/npm-repository.txt)"
             if [ "$repository" != 'git+https://github.com/VeloraTech/AgentTrace.git' ]; then
               echo "npm package @coachlogic/agenttrace is owned by a different repository: $repository" >&2
               exit 1
             fi
-          elif [[ "$repository" == *E404* ]]; then
+          elif grep -q 'E404' dist/npm-view.log; then
             echo 'npm package @coachlogic/agenttrace is not registered yet.'
           else
-            echo "$repository" >&2
+            cat dist/npm-view.log >&2
             exit 1
           fi
       - name: Package and checksum release assets
