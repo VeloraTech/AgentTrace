@@ -144,4 +144,4 @@ jobs:
           fi
       - name: Publish npm package with OIDC provenance
         if: steps.npm-version.outputs.publish == 'true'
-        run: npm publish --provenance
+        run: npm publish --access public --provenance
