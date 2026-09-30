@@ -6,16 +6,16 @@
 ![npm](https://img.shields.io/npm/v/%40coachlogic%2Fagenttrace)
 ![Release](https://img.shields.io/github/v/release/VeloraTech/AgentTrace)
 
-## Your AI agent is running. What else is running with it?
+## See what your AI coding agents actually do.
 
-AgentTrace finds running AI coding agents and shows the child-process tree observed for each one—so multiple agents stay separate instead of disappearing into one noisy process list.
+That is the destination. AgentTrace is being built to detect every running coding agent on your machine, separate their processes, and trace their activity.
 
 ```powershell
 npm install -g @coachlogic/agenttrace
 agenttrace run
 ```
 
-This is a one-time process snapshot. It does not yet record file, command, or network activity, or maintain live, persistent traces.
+Today, AgentTrace takes a one-time snapshot of detected agent processes and their observed child-process trees. It does not yet record file, command, or network activity, or maintain live, persistent traces.
 
 ## Current status
 
@@ -76,12 +76,12 @@ These are configured targets, not a claim that every target has already passed. 
 
 ## Create a release
 
-The next release is `0.1.2` because `v0.1.1` is already tagged. Keep the versions in `Cargo.toml`, `Cargo.lock`, and `package.json` in sync. After reviewing and committing the release changes, push the branch and tag:
+The next release is `0.1.3` because `v0.1.2` is already tagged. Keep the versions in `Cargo.toml`, `Cargo.lock`, and `package.json` in sync. After reviewing and committing the release changes, push the branch and tag:
 
 ```powershell
 git push origin main
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.1.3
+git push origin v0.1.3
 ```
 
 The tag is the release source of truth. GitHub Actions rejects malformed tags and any mismatch with either package version, then runs the six native tests/builds. If all pass, it stages and verifies the npm package, creates or reuses the GitHub Release, uploads the six binaries plus `SHA256SUMS` and the npm tarball, and publishes `@coachlogic/agenttrace` with provenance. Release uploads replace assets on retry; an already-published npm version is not published twice.
@@ -118,7 +118,7 @@ cargo package --list --allow-dirty
 cargo package --allow-dirty
 ```
 
-This creates `target\package\agenttrace-cli-0.1.2.crate`. crates.io publication is separate from the GitHub/npm release workflow.
+This creates `target\package\agenttrace-cli-0.1.3.crate`. crates.io publication is separate from the GitHub/npm release workflow.
 
 ## Clean generated files
 
