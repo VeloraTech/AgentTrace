@@ -1,0 +1,16 @@
+[package]
+name = "agenttrace-cli"
+version = "0.1.0"
+edition = "2024"
+description = "Local process discovery for AI coding agents"
+license = "MIT"
+readme = "README.md"
+keywords = ["agent", "cli", "process", "observability"]
+include = ["Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "src/**"]
+
+[[bin]]
+name = "agenttrace"
+path = "src/main.rs"
+
+[dependencies]
+sysinfo = "0.36.1"

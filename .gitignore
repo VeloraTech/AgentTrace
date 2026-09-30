@@ -1,0 +1,13 @@
+/target/
+/dist/
+*.crate
+*.tgz
+*.tar.gz
+*.log
+.env
+.env.*
+!.env.example
+.agenttrace/
+.DS_Store
+Thumbs.db
+clean.ps1
