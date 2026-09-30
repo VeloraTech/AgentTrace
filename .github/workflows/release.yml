@@ -102,14 +102,14 @@ jobs:
           node scripts/verify-package.js --all-platforms
       - name: Verify npm package ownership if name is already claimed
         run: |
-          if repository="$(npm view agenttrace repository.url --json 2>&1)"; then
+          if repository="$(npm view @coachlogic/agenttrace repository.url --json 2>&1)"; then
             repository="$(node -p 'JSON.parse(process.argv[1])' "$repository")"
             if [ "$repository" != 'git+https://github.com/VeloraTech/AgentTrace.git' ]; then
-              echo "npm package agenttrace is owned by a different repository: $repository" >&2
+              echo "npm package @coachlogic/agenttrace is owned by a different repository: $repository" >&2
               exit 1
             fi
           elif [[ "$repository" == *E404* ]]; then
-            echo 'npm package agenttrace is not registered yet.'
+            echo 'npm package @coachlogic/agenttrace is not registered yet.'
           else
             echo "$repository" >&2
             exit 1
@@ -136,9 +136,9 @@ jobs:
         env:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
-          if npm view "agenttrace@$VERSION" version >/dev/null 2>&1; then
+          if npm view "@coachlogic/agenttrace@$VERSION" version >/dev/null 2>&1; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "agenttrace@$VERSION already exists; skipping duplicate publish."
+            echo "@coachlogic/agenttrace@$VERSION already exists; skipping duplicate publish."
           else
             echo "publish=true" >> "$GITHUB_OUTPUT"
           fi

@@ -14,11 +14,12 @@ for (const platform of supportedPlatforms.keys()) {
 }
 
 const npmPackage = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-const npmTarball = `${npmPackage.name}-${npmPackage.version}.tgz`;
-const npmTarballPath = path.join(artifactDirectory, '..', 'npm', npmTarball);
-if (!fs.existsSync(npmTarballPath) || fs.statSync(npmTarballPath).size === 0) {
-  throw new Error(`The npm package tarball is missing or empty: ${npmTarballPath}`);
-}
+const npmDirectory = path.join(artifactDirectory, '..', 'npm');
+const npmTarballs = fs.readdirSync(npmDirectory).filter((filename) => filename.endsWith('.tgz'));
+if (npmTarballs.length !== 1) throw new Error(`Expected exactly one npm tarball in ${npmDirectory}; found ${npmTarballs.length}.`);
+const [npmTarball] = npmTarballs;
+const npmTarballPath = path.join(npmDirectory, npmTarball);
+if (fs.statSync(npmTarballPath).size === 0) throw new Error(`The npm package tarball is empty: ${npmTarballPath}`);
 const npmDigest = crypto.createHash('sha256').update(fs.readFileSync(npmTarballPath)).digest('hex');
 checksumLines.push(`${npmDigest}  ${npmTarball}`);
 

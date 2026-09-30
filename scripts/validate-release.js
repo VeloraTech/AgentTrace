@@ -17,8 +17,8 @@ if (cargoVersion !== version || npmPackage.version !== version) {
   throw new Error(`Tag ${tag} must match Cargo (${cargoVersion || 'missing'}) and npm (${npmPackage.version || 'missing'}) versions.`);
 }
 
-if (npmPackage.name !== 'agenttrace') {
-  throw new Error(`Expected npm package name "agenttrace"; found "${npmPackage.name}".`);
+if (npmPackage.name !== '@coachlogic/agenttrace') {
+  throw new Error(`Expected npm package name "@coachlogic/agenttrace"; found "${npmPackage.name}".`);
 }
 
 if (process.env.GITHUB_OUTPUT) {
