@@ -6,7 +6,16 @@
 ![npm](https://img.shields.io/npm/v/%40coachlogic%2Fagenttrace)
 ![Release](https://img.shields.io/github/v/release/VeloraTech/AgentTrace)
 
-AgentTrace is a local CLI for discovering AI coding-agent processes. It is being built as a system-level flight recorder: observed evidence should remain distinct from agent claims and derived conclusions.
+## Your AI agent is running. What else is running with it?
+
+AgentTrace finds running AI coding agents and shows the child-process tree observed for each one—so multiple agents stay separate instead of disappearing into one noisy process list.
+
+```powershell
+npm install -g @coachlogic/agenttrace
+agenttrace run
+```
+
+This is a one-time process snapshot. It does not yet record file, command, or network activity, or maintain live, persistent traces.
 
 ## Current status
 
@@ -67,11 +76,12 @@ These are configured targets, not a claim that every target has already passed. 
 
 ## Create a release
 
-Set the same stable semantic version in `Cargo.toml` and `package.json`, commit the change, and push the matching version tag:
+The next release is `0.1.2` because `v0.1.1` is already tagged. Keep the versions in `Cargo.toml`, `Cargo.lock`, and `package.json` in sync. After reviewing and committing the release changes, push the branch and tag:
 
-```bash
-git tag v0.1.1
-git push origin v0.1.1
+```powershell
+git push origin main
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
 The tag is the release source of truth. GitHub Actions rejects malformed tags and any mismatch with either package version, then runs the six native tests/builds. If all pass, it stages and verifies the npm package, creates or reuses the GitHub Release, uploads the six binaries plus `SHA256SUMS` and the npm tarball, and publishes `@coachlogic/agenttrace` with provenance. Release uploads replace assets on retry; an already-published npm version is not published twice.
@@ -80,7 +90,7 @@ The tag is the release source of truth. GitHub Actions rejects malformed tags an
 
 No npm token is stored in this repository or required by the release workflow. Configure npm Trusted Publishing for package `@coachlogic/agenttrace` with GitHub owner `VeloraTech`, repository `AgentTrace`, workflow filename `release.yml`, and permission to publish. The workflow requests only GitHub's short-lived OIDC token (`id-token: write`). npm requires Node.js 22.14+ and npm 11.5.1+ for trusted publishing; the publish job installs Node.js 24 and a compatible npm CLI.
 
-npm blocked the unscoped `agenttrace` name as too similar to an existing package. The authenticated npm account is `coachlogic`, so the package now uses `@coachlogic/agenttrace`; the CLI command remains `agenttrace`. Since `v0.1.0` is already tagged with the old metadata, the next release is `v0.1.1`. npm requires the package to exist before Trusted Publishing can be configured. For the first scoped publish, let the `v0.1.1` workflow build and attach its all-platform tarball, publish that tarball once with `npm publish --access public <tarball>`, configure OIDC for `@coachlogic/agenttrace`, then rerun the same tag workflow. It reuses the GitHub Release and skips the already-published npm version. Do not force-move the existing `v0.1.0` tag.
+npm blocked the unscoped `agenttrace` name as too similar to an existing package, so npm uses `@coachlogic/agenttrace` while the CLI command remains `agenttrace`. If this is the first publish of the scoped package, npm requires one initial publish before Trusted Publishing can be configured: publish the release tarball once with `npm publish --access public <tarball>`, configure OIDC for `@coachlogic/agenttrace`, then rerun that release workflow. For subsequent releases, the workflow publishes the package with provenance. Do not force-move existing version tags.
 
 For a project-local install, run the CLI through npm so its local `node_modules/.bin` directory is on `PATH`:
 
@@ -108,7 +118,7 @@ cargo package --list --allow-dirty
 cargo package --allow-dirty
 ```
 
-This creates `target\package\agenttrace-cli-0.1.1.crate`. crates.io publication is separate from the GitHub/npm release workflow.
+This creates `target\package\agenttrace-cli-0.1.2.crate`. crates.io publication is separate from the GitHub/npm release workflow.
 
 ## Clean generated files
 
