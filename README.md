@@ -1,7 +1,7 @@
 # AgentTrace
 
 ![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust)
-![Status](https://img.shields.io/badge/status-phase%201-blue)
+![Status](https://img.shields.io/badge/status-phase%202-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Registry](https://img.shields.io/badge/registry-Cargo%20package%20in%20progress-lightgrey)
 
@@ -9,7 +9,7 @@ AgentTrace is a local CLI for discovering AI coding-agent processes. It is being
 
 ## Current status
 
-Phase 1 takes a one-time process snapshot and reports candidate Claude Code, Codex, and Gemini CLI instances. Each process is listed separately using its PID and start time, with parent PID, executable, and working directory when available. Detection is best-effort and uses process names, executable paths, and known package markers.
+Phase 2 takes a one-time process snapshot, builds parent-child relationships, and assigns each observed descendant to its nearest detected agent process. Each agent process has an independent trace ID derived from its PID and start time, so same-agent instances stay separate even when they share a working directory. The display includes each trace's observed subprocess tree.
 
 This phase does not record file, command, or network activity. It does not yet maintain persistent traces or a live process view. Process details may be unavailable when the operating system restricts access. Windows command-line access can require elevated permissions; AgentTrace does not request elevation.
 
@@ -34,7 +34,7 @@ Omitting `run` takes the same discovery snapshot. Start an agent first, leave it
 cargo test
 ```
 
-The current tests cover agent classification and independent process identity. They do not yet exercise OS-level observation or multiple live agent processes.
+The tests cover agent classification, separate same-agent traces, nearest-ancestor attribution, and a real spawned child process. They do not yet exercise file, command, or network observation.
 
 ## Build and package
 
@@ -49,11 +49,11 @@ The executable is `target\release\agenttrace.exe` on Windows and `target/release
 Inspect and create the Cargo registry archive:
 
 ```powershell
-cargo package --list
-cargo package
+cargo package --list --allow-dirty
+cargo package --allow-dirty
 ```
 
-Cargo creates a compressed `.crate` source archive under `target/package/`. That is the Rust registry package; users can install its binary with `cargo install agenttrace-cli`, which provides the `agenttrace` command. For crates.io, first verify the package with `cargo publish --dry-run`, then publish with `cargo publish` after the package metadata and registry account are ready. Publishing is not automated by this repository.
+Cargo creates a compressed `.crate` source archive under `target/package/`. That is the Rust registry package; users can install its binary with `cargo install agenttrace-cli`, which provides the `agenttrace` command. For crates.io, commit the release changes, verify with `cargo publish --dry-run`, then publish with `cargo publish` after the package metadata and registry account are ready. Publishing is not automated by this repository.
 
 Standalone `.zip` or `.tar.gz` archives containing compiled binaries for each operating system can be added to release automation later. The Cargo `.crate` archive is source for Cargo, not a precompiled executable.
 
