@@ -5,6 +5,7 @@ edition = "2024"
 description = "Local process discovery for AI coding agents"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/VeloraTech/AgentTrace"
 keywords = ["agent", "cli", "process", "observability"]
 include = ["Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "src/**"]
 

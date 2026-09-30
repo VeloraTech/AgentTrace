@@ -1,5 +1,8 @@
 /target/
 /dist/
+/vendor/
+/node_modules/
+/.npm-cache/
 *.crate
 *.tgz
 *.tar.gz

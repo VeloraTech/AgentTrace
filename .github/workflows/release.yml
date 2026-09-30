@@ -1,0 +1,147 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate release version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - id: version
+        run: node scripts/validate-release.js "$GITHUB_REF_NAME"
+
+  build:
+    name: Build ${{ matrix.artifact }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            artifact: agenttrace-win32-x64.exe
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            artifact: agenttrace-win32-arm64.exe
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            artifact: agenttrace-darwin-x64
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            artifact: agenttrace-darwin-arm64
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            artifact: agenttrace-linux-x64
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: agenttrace-linux-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Run tests on target runner
+        run: cargo test --locked --target ${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Stage binary
+        run: node scripts/copy-binary.js "${{ matrix.target }}" "${{ matrix.artifact }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Create GitHub Release and publish npm
+    needs: [validate, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Ensure trusted-publishing npm version
+        run: npm install --global 'npm@^11.5.1'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: agenttrace-*
+          path: dist/release
+          merge-multiple: true
+      - name: Stage and verify npm package
+        run: |
+          node scripts/prepare-package.js dist/release
+          chmod +x bin/agenttrace.js
+          node scripts/verify-package.js --all-platforms
+      - name: Verify npm package ownership if name is already claimed
+        run: |
+          if repository="$(npm view agenttrace repository.url --json 2>&1)"; then
+            repository="$(node -p 'JSON.parse(process.argv[1])' "$repository")"
+            if [ "$repository" != 'git+https://github.com/VeloraTech/AgentTrace.git' ]; then
+              echo "npm package agenttrace is owned by a different repository: $repository" >&2
+              exit 1
+            fi
+          elif [[ "$repository" == *E404* ]]; then
+            echo 'npm package agenttrace is not registered yet.'
+          else
+            echo "$repository" >&2
+            exit 1
+          fi
+      - name: Package and checksum release assets
+        run: |
+          mkdir -p dist/npm
+          npm pack --pack-destination dist/npm
+          node scripts/checksums.js dist/release
+      - name: Create GitHub Release if needed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf 'AgentTrace %s\n\n- Native binaries for Windows, macOS, and Linux (x64 and ARM64).\n- SHA-256 checksums and the npm package tarball are attached.\n' "$GITHUB_REF_NAME" > dist/release-notes.md
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --verify-tag --notes-file dist/release-notes.md --title "AgentTrace $GITHUB_REF_NAME"
+          fi
+      - name: Upload release assets (safe to retry)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/release/* dist/npm/*.tgz --clobber
+      - name: Skip npm publish if this version already exists
+        id: npm-version
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          if npm view "agenttrace@$VERSION" version >/dev/null 2>&1; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "agenttrace@$VERSION already exists; skipping duplicate publish."
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish npm package with OIDC provenance
+        if: steps.npm-version.outputs.publish == 'true'
+        run: npm publish --provenance

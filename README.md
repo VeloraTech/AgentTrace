@@ -3,7 +3,8 @@
 ![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust)
 ![Status](https://img.shields.io/badge/status-phase%202-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Registry](https://img.shields.io/badge/registry-Cargo%20package%20in%20progress-lightgrey)
+![npm](https://img.shields.io/npm/v/agenttrace)
+![Release](https://img.shields.io/github/v/release/VeloraTech/AgentTrace)
 
 AgentTrace is a local CLI for discovering AI coding-agent processes. It is being built as a system-level flight recorder: observed evidence should remain distinct from agent claims and derived conclusions.
 
@@ -36,26 +37,69 @@ cargo test
 
 The tests cover agent classification, separate same-agent traces, nearest-ancestor attribution, and a real spawned child process. They do not yet exercise file, command, or network observation.
 
-## Build and package
+## Development commands
 
-Build the executable:
+Node.js 18 or newer and Rust stable/Cargo are needed for development. End users installing the published npm package do not need Rust: the package contains prebuilt binaries for each published target.
 
 ```powershell
-cargo build --release
+npm.cmd run build
+npm.cmd run build:release
+npm.cmd test
+npm.cmd run pack
 ```
 
-The executable is `target\release\agenttrace.exe` on Windows and `target/release/agenttrace` on Unix-like systems.
+`npm run pack` builds and packages only the current machine's binary for local testing. It is not the cross-platform release package. The authoritative package is assembled in GitHub Actions from all successful platform builds.
 
-Inspect and create the Cargo registry archive:
+## Release platforms
+
+The release workflow attempts native build-and-test jobs for:
+
+| npm platform | Rust target | CI runner |
+| --- | --- | --- |
+| Windows x64 | `x86_64-pc-windows-msvc` | `windows-2025` |
+| Windows ARM64 | `aarch64-pc-windows-msvc` | `windows-11-arm` |
+| macOS x64 | `x86_64-apple-darwin` | `macos-15-intel` |
+| macOS ARM64 | `aarch64-apple-darwin` | `macos-15` |
+| Linux x64 | `x86_64-unknown-linux-gnu` | `ubuntu-22.04` |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | `ubuntu-22.04-arm` |
+
+These are configured targets, not a claim that every target has already passed. A tag produces no release or npm publish unless every native runner builds and tests its target. Linux binaries are built on Ubuntu 22.04 and require a compatible glibc system. Verify the resulting release workflow before describing a target as supported.
+
+## Create a release
+
+Set the same stable semantic version in `Cargo.toml` and `package.json`, commit the change, and push the matching version tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The tag is the release source of truth. GitHub Actions rejects malformed tags and any mismatch with either package version, then runs the six native tests/builds. If all pass, it stages and verifies the npm package, creates or reuses the GitHub Release, uploads the six binaries plus `SHA256SUMS` and the npm tarball, and publishes `agenttrace` with provenance. Release uploads replace assets on retry; an already-published npm version is not published twice.
+
+### npm trusted publishing setup
+
+No npm token is stored in this repository or required by the release workflow. Configure npm Trusted Publishing for package `agenttrace` with GitHub owner `VeloraTech`, repository `AgentTrace`, workflow filename `release.yml`, and permission to publish. The workflow requests only GitHub's short-lived OIDC token (`id-token: write`). npm requires Node.js 22.14+ and npm 11.5.1+ for trusted publishing; the publish job installs Node.js 24 and a compatible npm CLI.
+
+npm requires a package to exist before a trusted publisher can be configured. The registry returned 404 for `agenttrace` when checked on 2026-09-30, but names are not reserved until published. For the first tag only, the workflow will build and release all assets, then its npm publish step will fail until the package exists. Download the attached all-platform `.tgz`, publish that package once from an authenticated npm account, configure the trusted publisher, and rerun the same tag workflow. It reuses the GitHub Release and skips the already-published npm version. Later tags publish automatically. Do not configure a long-lived token in the workflow.
+
+The resulting install command is:
+
+```bash
+npm install -g agenttrace
+agenttrace run
+```
+
+## crates.io source package
+
+The Rust source crate remains separately publishable as `agenttrace-cli`:
 
 ```powershell
+cargo test --locked
 cargo package --list --allow-dirty
 cargo package --allow-dirty
 ```
 
-Cargo creates a compressed `.crate` source archive under `target/package/`. That is the Rust registry package; users can install its binary with `cargo install agenttrace-cli`, which provides the `agenttrace` command. For crates.io, commit the release changes, verify with `cargo publish --dry-run`, then publish with `cargo publish` after the package metadata and registry account are ready. Publishing is not automated by this repository.
-
-Standalone `.zip` or `.tar.gz` archives containing compiled binaries for each operating system can be added to release automation later. The Cargo `.crate` archive is source for Cargo, not a precompiled executable.
+This creates `target\package\agenttrace-cli-0.1.0.crate`. crates.io publication is separate from the GitHub/npm release workflow.
 
 ## Clean generated files
 

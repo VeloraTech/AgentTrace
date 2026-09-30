@@ -1,0 +1,39 @@
+{
+  "name": "agenttrace",
+  "version": "0.1.0",
+  "description": "Local process discovery for AI coding agents",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/VeloraTech/AgentTrace.git"
+  },
+  "homepage": "https://github.com/VeloraTech/AgentTrace#readme",
+  "bugs": {
+    "url": "https://github.com/VeloraTech/AgentTrace/issues"
+  },
+  "keywords": [
+    "agent",
+    "cli",
+    "process",
+    "observability"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "agenttrace": "bin/agenttrace.js"
+  },
+  "scripts": {
+    "build": "cargo build --locked",
+    "build:release": "cargo build --release --locked",
+    "test": "cargo test --locked && node --test",
+    "pack": "node scripts/pack-local.js"
+  },
+  "files": [
+    "bin/",
+    "scripts/platform.js",
+    "vendor/",
+    "LICENSE",
+    "README.md"
+  ]
+}
