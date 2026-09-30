@@ -13,5 +13,4 @@
 .agenttrace/
 .DS_Store
 Thumbs.db
-clean.ps1
-agenttrace*
+coachlogic-agenttrace*

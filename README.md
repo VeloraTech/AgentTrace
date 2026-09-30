@@ -82,12 +82,21 @@ No npm token is stored in this repository or required by the release workflow. C
 
 npm blocked the unscoped `agenttrace` name as too similar to an existing package. The authenticated npm account is `coachlogic`, so the package now uses `@coachlogic/agenttrace`; the CLI command remains `agenttrace`. Since `v0.1.0` is already tagged with the old metadata, the next release is `v0.1.1`. npm requires the package to exist before Trusted Publishing can be configured. For the first scoped publish, let the `v0.1.1` workflow build and attach its all-platform tarball, publish that tarball once with `npm publish --access public <tarball>`, configure OIDC for `@coachlogic/agenttrace`, then rerun the same tag workflow. It reuses the GitHub Release and skips the already-published npm version. Do not force-move the existing `v0.1.0` tag.
 
-The resulting install command is:
+For a project-local install, run the CLI through npm so its local `node_modules/.bin` directory is on `PATH`:
+
+```bash
+npm install @coachlogic/agenttrace
+npm exec -- agenttrace run
+```
+
+For a global install, the command is available directly in the terminal:
 
 ```bash
 npm install -g @coachlogic/agenttrace
 agenttrace run
 ```
+
+AgentTrace exposes the `agenttrace` executable through npm's `bin` field. It does not modify the consuming project's `package.json` to add scripts; if you want an `npm run` shortcut, add one in that project yourself, for example: `"agenttrace": "agenttrace run"`.
 
 ## crates.io source package
 
