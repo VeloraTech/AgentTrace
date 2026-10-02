@@ -74,10 +74,18 @@ fn main() {
         return;
     }
     let result = match arguments.first().map(String::as_str) {
-        None | Some("run") => {
+        None => {
             discover_agents();
             Ok(0)
         }
+        Some("run") => match run_watch_options(&arguments[1..]) {
+            Ok(Some(watch_arguments)) => watch_agents(watch_arguments).map(|()| 0),
+            Ok(None) => {
+                discover_agents();
+                Ok(0)
+            }
+            Err(error) => Err(error),
+        },
         Some("watch") => watch_agents(&arguments[1..]).map(|()| 0),
         Some("history") => print_history(&arguments[1..]).map(|()| 0),
         Some("trace") => trace_command(&arguments[1..]),
@@ -94,6 +102,14 @@ fn main() {
             eprintln!("AgentTrace: {error}");
             std::process::exit(1);
         }
+    }
+}
+
+fn run_watch_options(arguments: &[String]) -> Result<Option<&[String]>, String> {
+    match arguments.first().map(String::as_str) {
+        None => Ok(None),
+        Some("--watch") => Ok(Some(&arguments[1..])),
+        Some(option) => Err(format!("unknown run option: {option}; use `agenttrace watch` for live polling")),
     }
 }
 
@@ -1232,6 +1248,7 @@ fn instance_key(pid: &str, start_time: u64) -> String {
 fn print_help() {
     println!("TRACE USAGE: agenttrace trace [--output PATH] [--cwd PATH] [--include-command-args] [--capture-streams] -- PROGRAM [ARGS...]");
     println!("TRACE OPTIONS: --output PATH; --cwd PATH; --include-command-args (sensitive); --capture-streams (up to 10 MiB per stream, sensitive); --watch-files (workspace metadata changes)\n");
+    println!("WATCH ALIAS: `agenttrace run --watch [WATCH OPTIONS]` is equivalent to `agenttrace watch [WATCH OPTIONS]`.\n");
     println!("AgentTrace — discover running AI coding-agent processes\n");
     println!("USAGE:\n    agenttrace [run]\n    agenttrace watch [--output PATH] [--interval-ms MS] [--duration-ms MS] [--include-command-args]\n    agenttrace history [--file PATH]\n\nCOMMANDS:\n    run       Take a one-time process snapshot (default)\n    watch     Stream process lifecycle events and append JSONL history\n    history   Print recorded JSONL history\n\nWATCH OPTIONS:\n    --output PATH            History file (default: .agenttrace/history.jsonl)\n    --interval-ms MS         Poll interval, at least 100 ms (default: 1000)\n    --duration-ms MS         Stop after a bounded recording session\n    --include-command-args   Persist raw command arguments; may expose secrets\n\nOPTIONS:\n    -h, --help    Print this help message");
 }
@@ -1360,6 +1377,20 @@ mod tests {
 
         let bounded = vec!["--duration-ms".to_string(), "500".to_string()];
         assert_eq!(parse_watch_options(&bounded).unwrap().duration, Some(Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn run_watch_alias_forwards_watch_options_and_rejects_unknown_flags() {
+        let arguments = vec![
+            "--watch".to_string(),
+            "--duration-ms".to_string(),
+            "2000".to_string(),
+        ];
+        let forwarded = run_watch_options(&arguments).unwrap().unwrap();
+        assert_eq!(forwarded, &["--duration-ms", "2000"]);
+        assert_eq!(parse_watch_options(forwarded).unwrap().duration, Some(Duration::from_secs(2)));
+        assert!(run_watch_options(&[]).unwrap().is_none());
+        assert!(run_watch_options(&["--unknown".to_string()]).is_err());
     }
 
     #[test]
