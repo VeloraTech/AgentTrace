@@ -1,7 +1,7 @@
 # AgentTrace
 
 ![Rust](https://img.shields.io/badge/Rust-2024-orange?logo=rust)
-![Status](https://img.shields.io/badge/status-phase%202-blue)
+![Status](https://img.shields.io/badge/status-phase%203%20complete-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![npm](https://img.shields.io/npm/v/%40coachlogic%2Fagenttrace)
 ![Release](https://img.shields.io/github/v/release/VeloraTech/AgentTrace)
@@ -15,15 +15,19 @@ npm install -g @coachlogic/agenttrace
 agenttrace run
 ```
 
-Today, AgentTrace takes a one-time snapshot of detected agent processes and their observed child-process trees. It does not yet record file, command, or network activity, or maintain live, persistent traces.
+Phase 3's portable trace-recorder milestone is complete. AgentTrace can take a process snapshot, poll running agent process trees into JSONL history, or launch a command under supervision and record its process lifecycle, observed descendants, streams, and optionally changed workspace files. Exact file-open/read and network monitoring are not available; they are planned for Phase 4.
 
 ## Current status
 
-Phase 2 takes a one-time process snapshot, builds parent-child relationships, and assigns each observed descendant to its nearest detected agent process. Each agent process has an independent trace ID derived from its PID and start time, so same-agent instances stay separate even when they share a working directory. The display includes each trace's observed subprocess tree.
+Snapshot mode takes a one-time process snapshot, builds parent-child relationships, and assigns each observed descendant to its nearest detected agent process. Each agent process has an independent trace ID derived from its PID and start time, so same-agent instances stay separate even when they share a working directory.
 
-This phase does not record file, command, or network activity. It does not yet maintain persistent traces or a live process view. Process details may be unavailable when the operating system restricts access. Windows command-line access can require elevated permissions; AgentTrace does not request elevation.
+`watch` polls agent process trees and appends discovery, metadata-change, and no-longer-observed events to `.agenttrace/history.jsonl`. Polling can miss short-lived processes and cannot establish their exit codes. `trace` launches a command, forwards stdin/stdout/stderr, and records process start/end times, exact exit status when available, and stream byte counts. It also polls observed descendants every 250 ms; short-lived children can be missed and their exit status is unavailable. Each JSONL event has a recorder `session_id`, sequence, timestamp, observation timestamp, and collector; supervised sessions also use their session ID as the execution `cycle_id`. These are recorder/process boundaries, not internal AI conversation or tool-call cycles.
 
-Command arguments are inspected in memory for detection but are never printed or persisted.
+Stream contents and raw command arguments are omitted unless explicitly enabled. `--capture-streams` stores up to 10 MiB per stream as hex, without redaction; captured data can contain credentials or private source. Supervised `trace` applies only to the launched command and observed descendants; it cannot collect arbitrary processes' streams. `--watch-files` opts into polling file metadata under the command working directory and reports created, modified, and deleted paths. It skips `.git`, `.agenttrace`, `node_modules`, `target`, and `.venv`, scans at most 10,000 files, and can miss transient changes. It does not establish that a process opened or read a file, and path names may be sensitive. File contents, exact file reads/opens, and network activity are not collected. This is not kernel-level system monitoring.
+
+Native system-wide file-open/read and network monitoring remain future work; the current recorder reports only the process and workspace metadata it can actually observe.
+
+For process discovery, command arguments are inspected in memory for detection but are not printed or persisted by default.
 
 ## Requirements
 
@@ -38,13 +42,30 @@ cargo run -- run
 
 Omitting `run` takes the same discovery snapshot. Start an agent first, leave it running, then launch this command in another terminal to see whether it is detected.
 
+Record and stream process-observation events until Ctrl+C, then inspect the JSONL history:
+
+```powershell
+cargo run -- watch
+cargo run -- history
+```
+
+Use `--duration-ms 10000` for a bounded 10-second session, `--interval-ms 500` to change the polling interval, or `--output PATH` to select another history file. `--include-command-args` records raw process arguments verbatim; they may contain secrets.
+
+Launch and trace a command, preserving its exit code and forwarding its standard streams:
+
+```powershell
+cargo run -- trace --output .agenttrace/command.jsonl -- PROGRAM ARG1 ARG2
+```
+
+For example, on Windows use `cargo run -- trace -- powershell -NoProfile -Command "Write-Output hello; exit 7"`; on macOS/Linux use `cargo run -- trace -- sh -c "echo hello; exit 7"`. AgentTrace returns the child exit code. Add `--watch-files` before `--` to detect workspace file metadata changes, `--capture-streams` to record raw stream bytes, or `--include-command-args` to persist arguments. Each may expose sensitive data. `--cwd PATH` sets the command working directory.
+
 ## Test
 
 ```powershell
 cargo test
 ```
 
-The tests cover agent classification, separate same-agent traces, nearest-ancestor attribution, and a real spawned child process. They do not yet exercise file, command, or network observation.
+The tests cover agent classification, separate same-agent traces, nearest-ancestor attribution, process polling, supervised descendant attribution, workspace file-delta events, option parsing, and stream-byte encoding. Native file-open/read and network observation is Phase 4 work, not a Phase 3 capability.
 
 ## Development commands
 
@@ -76,12 +97,12 @@ These are configured targets, not a claim that every target has already passed. 
 
 ## Create a release
 
-The next release is `0.1.3` because `v0.1.2` is already tagged. Keep the versions in `Cargo.toml`, `Cargo.lock`, and `package.json` in sync. After reviewing and committing the release changes, push the branch and tag:
+The published release is `0.1.3` (`v0.1.3` is already tagged). The next release should be `0.1.4`; keep versions in `Cargo.toml`, `Cargo.lock`, and `package.json` in sync before tagging. After review and commit, push the branch and tag:
 
 ```powershell
 git push origin main
-git tag v0.1.3
-git push origin v0.1.3
+git tag v0.1.4
+git push origin v0.1.4
 ```
 
 The tag is the release source of truth. GitHub Actions rejects malformed tags and any mismatch with either package version, then runs the six native tests/builds. If all pass, it stages and verifies the npm package, creates or reuses the GitHub Release, uploads the six binaries plus `SHA256SUMS` and the npm tarball, and publishes `@coachlogic/agenttrace` with provenance. Release uploads replace assets on retry; an already-published npm version is not published twice.
@@ -118,7 +139,7 @@ cargo package --list --allow-dirty
 cargo package --allow-dirty
 ```
 
-This creates `target\package\agenttrace-cli-0.1.3.crate`. crates.io publication is separate from the GitHub/npm release workflow.
+For version `0.1.4`, this creates `target\package\agenttrace-cli-0.1.4.crate`. crates.io publication is separate from the GitHub/npm release workflow.
 
 ## Clean generated files
 
