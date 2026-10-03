@@ -50,7 +50,7 @@ cargo run -- run --watch
 cargo run -- history
 ```
 
-Use `--duration-ms 10000` for a bounded 10-second session, `--interval-ms 500` to change the polling interval, or `--output PATH` to select another history file. `--include-command-args` records raw process arguments verbatim; they may contain secrets.
+Watch starts with a grouped summary of each detected agent, including its trace ID, PID, parent PID, working directory, executable, start time, and observed child process tree. It then prints timestamped live process changes rather than repeating the whole snapshot. Output is indented and color-coded in interactive terminals; color is disabled when output is piped or `NO_COLOR` is set. Use `--format json` for JSONL on stdout. The `.agenttrace/history.jsonl` file always remains JSONL; each event's `session_id` identifies one watch run, and process events' `trace_id` groups an agent and its observed descendants. Use `--duration-ms 10000` for a bounded 10-second session, `--interval-ms 500` to change the polling interval, or `--output PATH` to select another history file. `--include-command-args` records raw process arguments verbatim; they may contain secrets.
 
 Launch and trace a command, preserving its exit code and forwarding its standard streams:
 
@@ -98,12 +98,12 @@ These are configured targets, not a claim that every target has already passed. 
 
 ## Create a release
 
-The published release is `0.1.4` (`v0.1.4` is already tagged). The next release should be `0.1.5`; keep versions in `Cargo.toml`, `Cargo.lock`, and `package.json` in sync before tagging. After review and commit, push the branch and tag:
+The latest release is `0.1.5` (`v0.1.5` is already tagged). The next release is `0.1.6`; keep versions in `Cargo.toml`, `Cargo.lock`, and `package.json` in sync before tagging. After review and commit, push the branch and tag:
 
 ```powershell
 git push origin main
-git tag v0.1.5
-git push origin v0.1.5
+git tag v0.1.6
+git push origin v0.1.6
 ```
 
 The tag is the release source of truth. GitHub Actions rejects malformed tags and any mismatch with either package version, then runs the six native tests/builds. If all pass, it stages and verifies the npm package, creates or reuses the GitHub Release, uploads the six binaries plus `SHA256SUMS` and the npm tarball, and publishes `@coachlogic/agenttrace` with provenance. Release uploads replace assets on retry; an already-published npm version is not published twice.
@@ -140,7 +140,7 @@ cargo package --list --allow-dirty
 cargo package --allow-dirty
 ```
 
-For version `0.1.5`, this creates `target\package\agenttrace-cli-0.1.5.crate`. crates.io publication is separate from the GitHub/npm release workflow.
+For version `0.1.6`, this creates `target\package\agenttrace-cli-0.1.6.crate`. crates.io publication is separate from the GitHub/npm release workflow.
 
 ## Clean generated files
 

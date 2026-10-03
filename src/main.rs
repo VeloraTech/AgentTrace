@@ -2,7 +2,7 @@ use std::env;
 use std::ffi::OsStr;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -202,6 +202,13 @@ struct WatchOptions {
     interval: Duration,
     duration: Option<Duration>,
     include_command_args: bool,
+    format: WatchOutputFormat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WatchOutputFormat {
+    Pretty,
+    Json,
 }
 
 struct TraceOptions {
@@ -824,7 +831,11 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
 
     let session_id = format!("{}-{}", std::process::id(), unix_time_nanos());
     let mut sequence = 0_u64;
-    let mut stdout = io::stdout().lock();
+    let terminal = io::stdout();
+    let color = terminal.is_terminal()
+        && env::var_os("NO_COLOR").is_none()
+        && env::var("TERM").as_deref() != Ok("dumb");
+    let mut stdout = terminal.lock();
     write_event(
         &mut history,
         &mut stdout,
@@ -846,9 +857,14 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
                 "file_events": false
             }
         }),
+        options.format,
+        color,
+        true,
     )
     .map_err(|error| format!("cannot write session start event: {error}"))?;
-    eprintln!("Recording process events to {}. Press Ctrl+C to stop.", options.output.display());
+    if options.format == WatchOutputFormat::Json {
+        eprintln!("Recording process events to {}. Press Ctrl+C to stop.", options.output.display());
+    }
     if options.include_command_args {
         eprintln!("Command arguments are being written verbatim and may contain secrets.");
     }
@@ -857,6 +873,7 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
     let mut previous = HashMap::new();
     let started_at = Instant::now();
     let mut stop_reason = "ctrl_c";
+    let mut initial_snapshot = true;
     loop {
         if !running.load(Ordering::SeqCst) {
             break;
@@ -877,8 +894,18 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
             &mut sequence,
             &previous,
             &current,
+            options.format,
+            color,
+            initial_snapshot,
         )
         .map_err(|error| format!("cannot write process event: {error}"))?;
+        if initial_snapshot && options.format == WatchOutputFormat::Pretty {
+            stdout
+                .write_all(render_watch_snapshot(&traces, &session_id, options.interval, color).as_bytes())
+                .map_err(|error| format!("cannot write initial process snapshot: {error}"))?;
+            stdout.flush().map_err(|error| format!("cannot flush initial process snapshot: {error}"))?;
+        }
+        initial_snapshot = false;
         previous = current;
 
         let mut remaining = options.interval;
@@ -899,6 +926,9 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
         &mut sequence,
         "session_stopped",
         json!({ "reason": stop_reason }),
+        options.format,
+        color,
+        true,
     )
     .map_err(|error| format!("cannot write session stop event: {error}"))?;
     Ok(())
@@ -909,6 +939,7 @@ fn parse_watch_options(arguments: &[String]) -> Result<WatchOptions, String> {
     let mut interval_ms = DEFAULT_INTERVAL_MS;
     let mut duration_ms = None;
     let mut include_command_args = false;
+    let mut format = WatchOutputFormat::Pretty;
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].as_str() {
@@ -942,6 +973,15 @@ fn parse_watch_options(arguments: &[String]) -> Result<WatchOptions, String> {
                 duration_ms = Some(duration);
             }
             "--include-command-args" => include_command_args = true,
+            "--format" => {
+                index += 1;
+                format = match arguments.get(index).map(String::as_str) {
+                    Some("pretty") => WatchOutputFormat::Pretty,
+                    Some("json") => WatchOutputFormat::Json,
+                    Some(_) => return Err("--format must be `pretty` or `json`".to_string()),
+                    None => return Err("--format requires `pretty` or `json`".to_string()),
+                };
+            }
             option => return Err(format!("unknown watch option: {option}")),
         }
         index += 1;
@@ -951,6 +991,7 @@ fn parse_watch_options(arguments: &[String]) -> Result<WatchOptions, String> {
         interval: Duration::from_millis(interval_ms),
         duration: duration_ms.map(Duration::from_millis),
         include_command_args,
+        format,
     })
 }
 
@@ -1017,9 +1058,19 @@ fn write_process_changes(
     sequence: &mut u64,
     previous: &HashMap<String, ObservedProcess>,
     current: &HashMap<String, ObservedProcess>,
+    format: WatchOutputFormat,
+    color: bool,
+    initial_snapshot: bool,
 ) -> io::Result<()> {
     let mut identities: Vec<_> = current.keys().collect();
-    identities.sort();
+    identities.sort_by(|left, right| {
+        current[*left]
+            .trace_id
+            .cmp(&current[*right].trace_id)
+            .then_with(|| current[*left].depth.cmp(&current[*right].depth))
+            .then_with(|| current[*left].process.pid.cmp(&current[*right].process.pid))
+            .then_with(|| current[*left].process.start_time.cmp(&current[*right].process.start_time))
+    });
     for identity in identities {
         let process = &current[identity];
         let event_type = match previous.get(identity) {
@@ -1035,6 +1086,9 @@ fn write_process_changes(
                 sequence,
                 event_type,
                 process_event_data(process),
+                format,
+                color,
+                !initial_snapshot,
             )?;
         }
     }
@@ -1043,14 +1097,30 @@ fn write_process_changes(
         .keys()
         .filter(|identity| !current.contains_key(*identity))
         .collect();
-    disappeared.sort();
+    disappeared.sort_by(|left, right| {
+        previous[*left]
+            .trace_id
+            .cmp(&previous[*right].trace_id)
+            .then_with(|| previous[*left].depth.cmp(&previous[*right].depth))
+            .then_with(|| previous[*left].process.pid.cmp(&previous[*right].process.pid))
+    });
     for identity in disappeared {
         let process = &previous[identity];
         let mut data = process_event_data(process);
         data["exit_code"] = Value::Null;
         data["exit_code_available"] = Value::Bool(false);
         data["exit_observation"] = Value::String("not observed in this poll; may have exited or become inaccessible".to_string());
-        write_event(history, stdout, session_id, sequence, "process_unobserved", data)?;
+        write_event(
+            history,
+            stdout,
+            session_id,
+            sequence,
+            "process_unobserved",
+            data,
+            format,
+            color,
+            true,
+        )?;
     }
     Ok(())
 }
@@ -1086,6 +1156,9 @@ fn write_event(
     sequence: &mut u64,
     event_type: &str,
     data: Value,
+    format: WatchOutputFormat,
+    color: bool,
+    emit_pretty_output: bool,
 ) -> io::Result<()> {
     let timestamp = unix_time_millis();
     let event = json!({
@@ -1101,11 +1174,153 @@ fn write_event(
     serde_json::to_writer(&mut *history, &event)?;
     history.write_all(b"\n")?;
     history.flush()?;
-    serde_json::to_writer(&mut *stdout, &event)?;
-    stdout.write_all(b"\n")?;
-    stdout.flush()?;
+    let emit_output = format == WatchOutputFormat::Json || emit_pretty_output;
+    if emit_output {
+        match format {
+            WatchOutputFormat::Json => serde_json::to_writer(&mut *stdout, &event)?,
+            WatchOutputFormat::Pretty => {
+                stdout.write_all(render_watch_event(&event, color).as_bytes())?
+            }
+        }
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
+    }
     *sequence += 1;
     Ok(())
+}
+
+fn render_watch_event(event: &Value, color: bool) -> String {
+    let sequence = event["sequence"].as_u64().unwrap_or_default();
+    let event_type = event["event_type"].as_str().unwrap_or("event");
+    let data = &event["data"];
+    let (line, color_code) = match event_type {
+        "session_started" => (
+            format!(
+                "History: {}",
+                data["history_file"].as_str().unwrap_or(DEFAULT_HISTORY_PATH),
+            ),
+            "36",
+        ),
+        "session_stopped" => (
+            format!("Polling stopped ({})", data["reason"].as_str().unwrap_or("unknown reason")),
+            "36",
+        ),
+        "process_discovered" | "process_updated" | "process_unobserved" => {
+            let depth = data["depth_from_agent"].as_u64().unwrap_or_default() as usize;
+            let indent = "  ".repeat(depth);
+            let marker = match event_type {
+                "process_discovered" => "+",
+                "process_updated" => "~",
+                _ => "-",
+            };
+            let process_name = data["process_name"].as_str().unwrap_or("process");
+            let agent_type = data["agent_type"].as_str();
+            let label = if depth == 0 {
+                agent_type.unwrap_or(process_name).to_string()
+            } else {
+                process_name.to_string()
+            };
+            let pid = data["process_identity"]["pid"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| data["process_identity"]["pid"].as_u64().map(|pid| pid.to_string()))
+                .unwrap_or_else(|| "?".to_string());
+            let suffix = if event_type == "process_unobserved" {
+                " (no longer observed; exit status unavailable)"
+            } else if event_type == "process_updated" {
+                " (metadata updated)"
+            } else {
+                ""
+            };
+            let code = match event_type {
+                "process_discovered" => "32",
+                "process_updated" => "33",
+                _ => "31",
+            };
+            let parent_pid = data["parent_identity"]["pid"].as_str();
+            let parent = parent_pid.map(|pid| format!(", PPID {pid}")).unwrap_or_default();
+            let trace = if depth > 0 {
+                agent_type.map(|agent| format!(" · {agent}")).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let time = event["timestamp_unix_ms"]
+                .as_u64()
+                .map(format_utc_time)
+                .unwrap_or_else(|| "--:--:--Z".to_string());
+            (
+                format!("{time} {indent}{marker} {label} (PID {pid}{parent}){trace}{suffix}"),
+                code,
+            )
+        }
+        _ => (format!("{event_type}: {data}"), "90"),
+    };
+    let line = format!("[{sequence:05}] {line}");
+    if color {
+        format!("\x1b[{color_code}m{line}\x1b[0m")
+    } else {
+        line
+    }
+}
+
+fn render_watch_snapshot(traces: &[AgentTrace], session_id: &str, interval: Duration, color: bool) -> String {
+    let mut output = String::new();
+    let heading = format!("Watching {} agent{} · polling every {} ms · run {session_id}", traces.len(), if traces.len() == 1 { "" } else { "s" }, interval.as_millis());
+    output.push_str(&paint(&heading, "36", color));
+    output.push('\n');
+    if traces.is_empty() {
+        output.push_str("  No supported agent processes detected yet; watching for new processes.\n");
+        return output;
+    }
+
+    for (index, trace) in traces.iter().enumerate() {
+        let label = trace.root.agent_type.expect("trace roots are detected agents").label();
+        output.push_str(&format!("\n{}. {} · PID {} · PPID {}\n", index + 1, paint(label, "32", color), trace.root.pid, trace.root.parent_pid.as_deref().unwrap_or("unavailable")));
+        output.push_str(&format!("   Trace ID: {}\n", trace.trace_id));
+        output.push_str(&format!("   Started (Unix): {}\n", trace.root.start_time));
+        output.push_str(&format!("   Working directory: {}\n", trace.root.working_directory.as_deref().unwrap_or("unavailable")));
+        output.push_str(&format!("   Executable: {}\n", trace.root.executable.as_deref().unwrap_or("unavailable")));
+        output.push_str("   Child processes:\n");
+        if trace.descendants.is_empty() {
+            output.push_str("     (none observed)\n");
+        } else {
+            append_process_tree(&mut output, &trace.descendants, &trace.root.pid, "     ");
+        }
+    }
+    output.push_str("\nLive activity (new process changes appear below)\n");
+    output
+}
+
+fn append_process_tree(output: &mut String, descendants: &[TraceProcess], parent_pid: &str, prefix: &str) {
+    let children: Vec<_> = descendants
+        .iter()
+        .filter(|descendant| descendant.process.parent_pid.as_deref() == Some(parent_pid))
+        .collect();
+    for (index, descendant) in children.iter().enumerate() {
+        let last = index + 1 == children.len();
+        let branch = if last { "└─" } else { "├─" };
+        output.push_str(&format!(
+            "{prefix}{branch} {} · PID {} · PPID {}\n",
+            descendant.process.name,
+            descendant.process.pid,
+            descendant.process.parent_pid.as_deref().unwrap_or("unavailable")
+        ));
+        let nested_prefix = format!("{prefix}{}", if last { "   " } else { "│  " });
+        append_process_tree(output, descendants, &descendant.process.pid, &nested_prefix);
+    }
+}
+
+fn paint(text: &str, color_code: &str, color: bool) -> String {
+    if color {
+        format!("\x1b[{color_code}m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+fn format_utc_time(timestamp_unix_ms: u64) -> String {
+    let seconds_since_midnight = (timestamp_unix_ms / 1_000) % 86_400;
+    format!("{:02}:{:02}:{:02}Z", seconds_since_midnight / 3_600, (seconds_since_midnight / 60) % 60, seconds_since_midnight % 60)
 }
 
 fn unix_time_millis() -> u64 {
@@ -1249,6 +1464,7 @@ fn print_help() {
     println!("TRACE USAGE: agenttrace trace [--output PATH] [--cwd PATH] [--include-command-args] [--capture-streams] -- PROGRAM [ARGS...]");
     println!("TRACE OPTIONS: --output PATH; --cwd PATH; --include-command-args (sensitive); --capture-streams (up to 10 MiB per stream, sensitive); --watch-files (workspace metadata changes)\n");
     println!("WATCH ALIAS: `agenttrace run --watch [WATCH OPTIONS]` is equivalent to `agenttrace watch [WATCH OPTIONS]`.\n");
+    println!("WATCH OUTPUT: defaults to indented readable events; use `--format json` for JSONL stdout. Color is automatic and disabled by `NO_COLOR`.\n");
     println!("AgentTrace — discover running AI coding-agent processes\n");
     println!("USAGE:\n    agenttrace [run]\n    agenttrace watch [--output PATH] [--interval-ms MS] [--duration-ms MS] [--include-command-args]\n    agenttrace history [--file PATH]\n\nCOMMANDS:\n    run       Take a one-time process snapshot (default)\n    watch     Stream process lifecycle events and append JSONL history\n    history   Print recorded JSONL history\n\nWATCH OPTIONS:\n    --output PATH            History file (default: .agenttrace/history.jsonl)\n    --interval-ms MS         Poll interval, at least 100 ms (default: 1000)\n    --duration-ms MS         Stop after a bounded recording session\n    --include-command-args   Persist raw command arguments; may expose secrets\n\nOPTIONS:\n    -h, --help    Print this help message");
 }
@@ -1374,9 +1590,71 @@ mod tests {
         assert_eq!(options.output, PathBuf::from(DEFAULT_HISTORY_PATH));
         assert!(options.duration.is_none());
         assert!(!options.include_command_args);
+        assert_eq!(options.format, WatchOutputFormat::Pretty);
 
         let bounded = vec!["--duration-ms".to_string(), "500".to_string()];
         assert_eq!(parse_watch_options(&bounded).unwrap().duration, Some(Duration::from_millis(500)));
+
+        let json_format = vec!["--format".to_string(), "json".to_string()];
+        assert_eq!(parse_watch_options(&json_format).unwrap().format, WatchOutputFormat::Json);
+        let invalid_format = vec!["--format".to_string(), "xml".to_string()];
+        assert!(parse_watch_options(&invalid_format).is_err());
+    }
+
+    #[test]
+    fn pretty_watch_output_indents_processes_and_colors_only_when_requested() {
+        let event = json!({
+            "sequence": 7,
+            "timestamp_unix_ms": 1_000,
+            "event_type": "process_discovered",
+            "data": {
+                "depth_from_agent": 2,
+                "agent_type": "Codex",
+                "process_name": "node",
+                "process_identity": { "pid": "42" }
+            }
+        });
+        let plain = render_watch_event(&event, false);
+        assert_eq!(plain, "[00007] 00:00:01Z     + node (PID 42) · Codex");
+        assert!(!plain.contains("\x1b["));
+        assert!(render_watch_event(&event, true).contains("\x1b[32m"));
+    }
+
+    #[test]
+    fn watch_snapshot_shows_agent_metadata_and_child_processes() {
+        let root = process_record("100", Some("50"), Some(AgentType::Codex), 1_700_000_000, Some("C:/repo"));
+        let child = process_record("101", Some("100"), None, 1_700_000_010, None);
+        let traces = build_traces(&[root, child]);
+
+        let output = render_watch_snapshot(&traces, "watch-run-1", Duration::from_secs(1), false);
+
+        assert!(output.contains("Watching 1 agent · polling every 1000 ms · run watch-run-1"));
+        assert!(output.contains("Trace ID: trace-100:1700000000"));
+        assert!(output.contains("Working directory: C:/repo"));
+        assert!(output.contains("Child processes:"));
+        assert!(output.contains("PID 101"));
+        assert!(output.contains("Live activity"));
+    }
+
+    #[test]
+    fn watch_snapshot_preserves_nested_child_process_relationships() {
+        let processes = vec![
+            process_record("100", None, Some(AgentType::Codex), 10, None),
+            process_record("101", Some("100"), None, 11, None),
+            process_record("102", Some("100"), None, 12, None),
+            process_record("103", Some("101"), None, 13, None),
+        ];
+        let traces = build_traces(&processes);
+        let output = render_watch_snapshot(&traces, "watch-run-1", Duration::from_secs(1), false);
+
+        assert!(output.contains("├─ test-process · PID 101"));
+        assert!(output.contains("│  └─ test-process · PID 103"));
+        assert!(output.contains("└─ test-process · PID 102"));
+    }
+
+    #[test]
+    fn watch_event_time_uses_utc_clock_format() {
+        assert_eq!(format_utc_time(86_401_000), "00:00:01Z");
     }
 
     #[test]
@@ -1500,6 +1778,9 @@ mod tests {
             &mut sequence,
             &HashMap::new(),
             &current,
+            WatchOutputFormat::Json,
+            false,
+            false,
         )
         .unwrap();
         write_process_changes(
@@ -1509,6 +1790,9 @@ mod tests {
             &mut sequence,
             &current,
             &updated,
+            WatchOutputFormat::Json,
+            false,
+            false,
         )
         .unwrap();
         write_process_changes(
@@ -1518,6 +1802,9 @@ mod tests {
             &mut sequence,
             &updated,
             &HashMap::new(),
+            WatchOutputFormat::Json,
+            false,
+            false,
         )
         .unwrap();
 
