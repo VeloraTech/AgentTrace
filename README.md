@@ -15,6 +15,8 @@ npm install -g @coachlogic/agenttrace
 agenttrace run
 ```
 
+![AgentTrace process-watch demo](assets/demo.gif)
+
 Phase 3's portable trace-recorder milestone is complete. AgentTrace can take a process snapshot, poll running agent process trees into JSONL history, or launch a command under supervision and record its process lifecycle, observed descendants, streams, and optionally changed workspace files. Exact file-open/read and network monitoring are not available; they are planned for Phase 4.
 
 ## Current status
@@ -98,12 +100,12 @@ These are configured targets, not a claim that every target has already passed. 
 
 ## Create a release
 
-The latest release is `0.1.5` (`v0.1.5` is already tagged). The next release is `0.1.6`; keep versions in `Cargo.toml`, `Cargo.lock`, and `package.json` in sync before tagging. After review and commit, push the branch and tag:
+The latest release is `0.1.6` (`v0.1.6` is already tagged). The next release is `0.1.7`; keep versions in `Cargo.toml`, `Cargo.lock`, and `package.json` in sync before tagging. After review and commit, push the branch and tag:
 
 ```powershell
 git push origin main
-git tag v0.1.6
-git push origin v0.1.6
+git tag v0.1.7
+git push origin v0.1.7
 ```
 
 The tag is the release source of truth. GitHub Actions rejects malformed tags and any mismatch with either package version, then runs the six native tests/builds. If all pass, it stages and verifies the npm package, creates or reuses the GitHub Release, uploads the six binaries plus `SHA256SUMS` and the npm tarball, and publishes `@coachlogic/agenttrace` with provenance. Release uploads replace assets on retry; an already-published npm version is not published twice.
@@ -140,7 +142,7 @@ cargo package --list --allow-dirty
 cargo package --allow-dirty
 ```
 
-For version `0.1.6`, this creates `target\package\agenttrace-cli-0.1.6.crate`. crates.io publication is separate from the GitHub/npm release workflow.
+For version `0.1.7`, this creates `target\package\agenttrace-cli-0.1.7.crate`. crates.io publication is separate from the GitHub/npm release workflow.
 
 ## Clean generated files
 
