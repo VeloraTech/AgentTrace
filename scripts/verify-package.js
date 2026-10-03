@@ -16,7 +16,7 @@ if (result.status !== 0) throw new Error(result.stderr || `npm pack exited with 
 
 const packDetails = JSON.parse(result.stdout)[0];
 const files = new Set(packDetails.files.map((file) => file.path));
-const requiredFiles = ['package.json', 'README.md', 'LICENSE', 'bin/agenttrace.js', 'scripts/platform.js'];
+const requiredFiles = ['package.json', 'README.md', 'LICENSE', 'bin/agenttrace.js', 'scripts/platform.js', 'assets/demo.gif'];
 const platforms = releasePackage
   ? [...supportedPlatforms.keys()]
   : [`${process.platform}-${process.arch}`];
