@@ -107,12 +107,12 @@ These are configured targets, not a claim that every target has already passed. 
 
 ## Create a release
 
-The latest successful release is `0.1.6` (`v0.1.6` is already tagged). The next release is `0.1.8`; `v0.1.7` was tagged but its workflow failed before publishing. Keep versions in `Cargo.toml`, `Cargo.lock`, and `package.json` in sync before tagging. After review and commit, push the branch and tag:
+Keep versions in `Cargo.toml`, `Cargo.lock`, and `package.json` in sync before tagging. The tag must match the package versions exactly (for example, version `0.1.9` uses tag `v0.1.9`). After review and commit, push the branch and tag:
 
 ```powershell
 git push origin main
-git tag v0.1.8
-git push origin v0.1.8
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
 The tag is the release source of truth. GitHub Actions rejects malformed tags and any mismatch with either package version, then runs the six native tests/builds. If all pass, it stages and verifies the npm package, creates or reuses the GitHub Release, uploads the six binaries plus `SHA256SUMS` and the npm tarball, and publishes `@coachlogic/agenttrace` with provenance. Release uploads replace assets on retry; an already-published npm version is not published twice.
@@ -149,7 +149,7 @@ cargo package --list --allow-dirty
 cargo package --allow-dirty
 ```
 
-For version `0.1.8`, this creates `target\package\agenttrace-cli-0.1.8.crate`. crates.io publication is separate from the GitHub/npm release workflow.
+For the version in `Cargo.toml`, this creates the matching crate in `target\package`. crates.io publication is separate from the GitHub/npm release workflow.
 
 ## Clean generated files
 
