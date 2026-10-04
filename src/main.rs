@@ -175,7 +175,7 @@ fn print_traces(traces: &[AgentTrace]) {
         println!("   Parent PID: {}", trace.root.parent_pid.as_deref().unwrap_or("unavailable"));
         println!("   Working directory: {}", trace.root.working_directory.as_deref().unwrap_or("unavailable"));
         println!("   Executable: {}", trace.root.executable.as_deref().unwrap_or("unavailable"));
-        println!("   Started (Unix time): {}", trace.root.start_time);
+        println!("   Started: {}", format_local_datetime(trace.root.start_time));
         println!("   Process tree:");
         if trace.descendants.is_empty() {
             println!("     (no observed child processes)");
@@ -209,6 +209,7 @@ struct WatchOptions {
 enum WatchOutputFormat {
     Pretty,
     Json,
+    PrettyJson,
 }
 
 struct TraceOptions {
@@ -217,6 +218,7 @@ struct TraceOptions {
     capture_streams: bool,
     include_command_args: bool,
     watch_files: bool,
+    check: bool,
     program: String,
     arguments: Vec<String>,
 }
@@ -230,20 +232,37 @@ struct TraceEventLog {
 impl TraceEventLog {
     fn emit(&mut self, event_type: &str, data: Value) -> io::Result<()> {
         let timestamp = unix_time_millis();
-        let event = json!({
+        let timestamp_iso8601 = local_timestamp();
+        let mut event = json!({
             "schema_version": 1,
             "session_id": self.session_id,
             "cycle_id": self.session_id,
             "sequence": self.sequence,
+            "timestamp": timestamp_iso8601,
             "timestamp_unix_ms": timestamp,
             "observed_at_unix_ms": timestamp,
             "collector": "supervised_execution",
             "event_type": event_type,
             "data": data
         });
+        if event_type.starts_with("check.") {
+            if let Some(fields) = event["data"].as_object().cloned() {
+                let object = event.as_object_mut().expect("event envelope is an object");
+                object.insert("type".to_string(), json!(event_type));
+                object.remove("event_type");
+                object.remove("data");
+                object.extend(fields);
+            }
+        }
         serde_json::to_writer(&mut self.writer, &event)?;
         self.writer.write_all(b"\n")?;
         self.writer.flush()?;
+        if matches!(event_type, "process_discovered" | "process_updated" | "process_unobserved" | "file_changed" | "collector_status")
+            && io::stderr().is_terminal()
+        {
+            let color = env::var_os("NO_COLOR").is_none() && env::var("TERM").as_deref() != Ok("dumb");
+            eprintln!("{}", render_history_event(&event, color));
+        }
         self.sequence += 1;
         Ok(())
     }
@@ -335,10 +354,34 @@ fn trace_command(arguments: &[String]) -> Result<i32, String> {
         .map_err(|_| "event logger lock was poisoned".to_string())?
         .emit("process_started", process_data)
         .map_err(|error| format!("cannot write process start event: {error}"))?;
+    let check_started_at = local_timestamp();
+    if options.check {
+        let command = traced_command(&options.program, &options.arguments, options.include_command_args);
+        log.lock()
+            .map_err(|_| "event logger lock was poisoned".to_string())?
+            .emit("check.started", check_started_data(&command, pid, check_started_at.clone()))
+        .map_err(|error| format!("cannot write check start event: {error}"))?;
+    }
     if options.capture_streams {
         eprintln!("Warning: stream contents are being recorded verbatim and may contain secrets or private source code.");
     }
-    eprintln!("Tracing PID {pid}; events are appended to {}.", options.output.display());
+    let terminal_color = io::stderr().is_terminal()
+        && env::var_os("NO_COLOR").is_none()
+        && env::var("TERM").as_deref() != Ok("dumb");
+    let process_label = traced_command(&options.program, &options.arguments, options.include_command_args);
+    eprintln!("{}", paint(
+        &format!("{} process.started  {process_label}  PID {pid}", format_local_time(unix_time_millis())),
+        "36",
+        terminal_color,
+    ));
+    if options.check {
+        eprintln!("{}", paint(
+            &format!("{} check.started    {process_label}  PID {pid}", format_local_time(unix_time_millis())),
+            "33",
+            terminal_color,
+        ));
+    }
+    eprintln!("Events: {}", options.output.display());
 
     let stdin = child.stdin.take().expect("piped child stdin");
     let stdin_log = Arc::clone(&log);
@@ -458,6 +501,7 @@ fn trace_command(arguments: &[String]) -> Result<i32, String> {
         .map_err(|_| "event logger lock was poisoned".to_string())?
         .emit("process_exited", json!({
             "trace_id": trace_id,
+            "executable": options.program,
             "process_identity": { "pid": pid, "start_time_unix_ms": started_at },
             "ended_at_unix_ms": ended_at,
             "duration_ms": ended_at.saturating_sub(started_at),
@@ -465,6 +509,33 @@ fn trace_command(arguments: &[String]) -> Result<i32, String> {
             "exit_code_available": exit_code.is_some()
         }))
         .map_err(|error| format!("cannot write process exit event: {error}"))?;
+    if options.check {
+        let completed_at = local_timestamp();
+        log.lock()
+            .map_err(|_| "event logger lock was poisoned".to_string())?
+            .emit("check.completed", check_completed_data(
+                &traced_command(&options.program, &options.arguments, options.include_command_args),
+                pid,
+                exit_code,
+                check_started_at,
+                completed_at,
+                ended_at.saturating_sub(started_at),
+            ))
+            .map_err(|error| format!("cannot write check completion event: {error}"))?;
+    }
+    let exit_label = exit_code.map(|code| format!("exit {code}")).unwrap_or_else(|| "exit status unavailable".to_string());
+    eprintln!("{}", paint(
+        &format!("{} process.exited   {process_label}  PID {pid}  {exit_label}  {} ms", format_local_time(ended_at), ended_at.saturating_sub(started_at)),
+        if exit_code.is_some_and(|code| code != 0) { "31" } else { "36" },
+        terminal_color,
+    ));
+    if options.check {
+        eprintln!("{}", paint(
+            &format!("{} check.completed {process_label}  exit {}  {} ms", format_local_time(ended_at), exit_code.map_or_else(|| "unknown".to_string(), |code| code.to_string()), ended_at.saturating_sub(started_at)),
+            if exit_code == Some(0) { "32" } else { "31" },
+            terminal_color,
+        ));
+    }
     log.lock()
         .map_err(|_| "event logger lock was poisoned".to_string())?
         .emit("session_stopped", json!({ "reason": "process_exited" }))
@@ -782,6 +853,7 @@ fn parse_trace_options(arguments: &[String]) -> Result<TraceOptions, String> {
     let mut capture_streams = false;
     let mut include_command_args = false;
     let mut watch_files = false;
+    let mut check = false;
     let mut index = 0;
     while index < separator {
         match arguments[index].as_str() {
@@ -796,6 +868,7 @@ fn parse_trace_options(arguments: &[String]) -> Result<TraceOptions, String> {
             "--capture-streams" => capture_streams = true,
             "--include-command-args" => include_command_args = true,
             "--watch-files" => watch_files = true,
+            "--check" => check = true,
             option => return Err(format!("unknown trace option: {option}")),
         }
         index += 1;
@@ -808,6 +881,7 @@ fn parse_trace_options(arguments: &[String]) -> Result<TraceOptions, String> {
         capture_streams,
         include_command_args,
         watch_files,
+        check,
         program: program.clone(),
         arguments: command_arguments.to_vec(),
     })
@@ -859,7 +933,7 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
         }),
         options.format,
         color,
-        true,
+        options.format != WatchOutputFormat::PrettyJson,
     )
     .map_err(|error| format!("cannot write session start event: {error}"))?;
     if options.format == WatchOutputFormat::Json {
@@ -904,6 +978,12 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
                 .write_all(render_watch_snapshot(&traces, &session_id, options.interval, color).as_bytes())
                 .map_err(|error| format!("cannot write initial process snapshot: {error}"))?;
             stdout.flush().map_err(|error| format!("cannot flush initial process snapshot: {error}"))?;
+        } else if initial_snapshot && options.format == WatchOutputFormat::PrettyJson {
+            serde_json::to_writer_pretty(&mut stdout, &watch_snapshot_json(&traces))
+                .map_err(|error| format!("cannot format initial JSON snapshot: {error}"))?;
+            stdout.write_all(b"\n\n")
+                .and_then(|()| stdout.flush())
+                .map_err(|error| format!("cannot write initial JSON snapshot: {error}"))?;
         }
         initial_snapshot = false;
         previous = current;
@@ -973,13 +1053,16 @@ fn parse_watch_options(arguments: &[String]) -> Result<WatchOptions, String> {
                 duration_ms = Some(duration);
             }
             "--include-command-args" => include_command_args = true,
+            "--json" => format = WatchOutputFormat::Json,
+            "--pretty-json" => format = WatchOutputFormat::PrettyJson,
             "--format" => {
                 index += 1;
                 format = match arguments.get(index).map(String::as_str) {
                     Some("pretty") => WatchOutputFormat::Pretty,
                     Some("json") => WatchOutputFormat::Json,
-                    Some(_) => return Err("--format must be `pretty` or `json`".to_string()),
-                    None => return Err("--format requires `pretty` or `json`".to_string()),
+                    Some("pretty-json") => WatchOutputFormat::PrettyJson,
+                    Some(_) => return Err("--format must be `pretty`, `json`, or `pretty-json`".to_string()),
+                    None => return Err("--format requires `pretty`, `json`, or `pretty-json`".to_string()),
                 };
             }
             option => return Err(format!("unknown watch option: {option}")),
@@ -1161,10 +1244,12 @@ fn write_event(
     emit_pretty_output: bool,
 ) -> io::Result<()> {
     let timestamp = unix_time_millis();
+    let timestamp_iso8601 = local_timestamp();
     let event = json!({
         "schema_version": 1,
         "session_id": session_id,
         "sequence": *sequence,
+        "timestamp": timestamp_iso8601,
         "timestamp_unix_ms": timestamp,
         "observed_at_unix_ms": timestamp,
         "collector": "sysinfo_polling",
@@ -1174,10 +1259,17 @@ fn write_event(
     serde_json::to_writer(&mut *history, &event)?;
     history.write_all(b"\n")?;
     history.flush()?;
-    let emit_output = format == WatchOutputFormat::Json || emit_pretty_output;
+    let emit_output = match format {
+        WatchOutputFormat::Pretty | WatchOutputFormat::PrettyJson => emit_pretty_output,
+        WatchOutputFormat::Json => true,
+    };
     if emit_output {
         match format {
             WatchOutputFormat::Json => serde_json::to_writer(&mut *stdout, &event)?,
+            WatchOutputFormat::PrettyJson => {
+                serde_json::to_writer_pretty(&mut *stdout, &event)?;
+                stdout.write_all(b"\n")?;
+            }
             WatchOutputFormat::Pretty => {
                 stdout.write_all(render_watch_event(&event, color).as_bytes())?
             }
@@ -1205,18 +1297,24 @@ fn render_watch_event(event: &Value, color: bool) -> String {
             format!("Polling stopped ({})", data["reason"].as_str().unwrap_or("unknown reason")),
             "36",
         ),
+        "collector_status" => (
+            format!(
+                "{} collector {}{}",
+                data["collector"].as_str().unwrap_or("unknown"),
+                data["status"].as_str().unwrap_or("status unknown"),
+                data["reason"].as_str().map(|reason| format!(": {reason}")).unwrap_or_default()
+            ),
+            "33",
+        ),
         "process_discovered" | "process_updated" | "process_unobserved" => {
             let depth = data["depth_from_agent"].as_u64().unwrap_or_default() as usize;
             let indent = "  ".repeat(depth);
-            let marker = match event_type {
-                "process_discovered" => "+",
-                "process_updated" => "~",
-                _ => "-",
-            };
             let process_name = data["process_name"].as_str().unwrap_or("process");
             let agent_type = data["agent_type"].as_str();
             let label = if depth == 0 {
                 agent_type.unwrap_or(process_name).to_string()
+            } else if let Some(arguments) = data["command_args"].as_array() {
+                arguments.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")
             } else {
                 process_name.to_string()
             };
@@ -1232,11 +1330,6 @@ fn render_watch_event(event: &Value, color: bool) -> String {
             } else {
                 ""
             };
-            let code = match event_type {
-                "process_discovered" => "32",
-                "process_updated" => "33",
-                _ => "31",
-            };
             let parent_pid = data["parent_identity"]["pid"].as_str();
             let parent = parent_pid.map(|pid| format!(", PPID {pid}")).unwrap_or_default();
             let trace = if depth > 0 {
@@ -1244,19 +1337,30 @@ fn render_watch_event(event: &Value, color: bool) -> String {
             } else {
                 String::new()
             };
-            let time = event["timestamp_unix_ms"]
-                .as_u64()
-                .map(format_utc_time)
-                .unwrap_or_else(|| "--:--:--Z".to_string());
+            let event_label = match event_type {
+                "process_discovered" => "process.started",
+                "process_updated" => "process.updated",
+                _ => "process.unobserved",
+            };
+            let time = event_time(event, false);
             (
-                format!("{time} {indent}{marker} {label} (PID {pid}{parent}){trace}{suffix}"),
-                code,
+                format!(
+                    "{} {indent}{} {} (PID {}{}){}{}",
+                    paint(&time, "90", color),
+                    paint(&format!("{event_label:<18}"), "36", color),
+                    paint(&label, process_role_color(&label, if depth == 0 { agent_type } else { None }), color),
+                    paint(&pid, "90", color),
+                    paint(&parent, "90", color),
+                    paint(&trace, "90", color),
+                    paint(suffix, if event_type == "process_unobserved" { "31" } else { "90" }, color),
+                ),
+                "",
             )
         }
         _ => (format!("{event_type}: {data}"), "90"),
     };
     let line = format!("[{sequence:05}] {line}");
-    if color {
+    if color && !color_code.is_empty() {
         format!("\x1b[{color_code}m{line}\x1b[0m")
     } else {
         line
@@ -1273,41 +1377,73 @@ fn render_watch_snapshot(traces: &[AgentTrace], session_id: &str, interval: Dura
         return output;
     }
 
-    for (index, trace) in traces.iter().enumerate() {
+    for trace in traces {
         let label = trace.root.agent_type.expect("trace roots are detected agents").label();
-        output.push_str(&format!("\n{}. {} · PID {} · PPID {}\n", index + 1, paint(label, "32", color), trace.root.pid, trace.root.parent_pid.as_deref().unwrap_or("unavailable")));
-        output.push_str(&format!("   Trace ID: {}\n", trace.trace_id));
-        output.push_str(&format!("   Started (Unix): {}\n", trace.root.start_time));
-        output.push_str(&format!("   Working directory: {}\n", trace.root.working_directory.as_deref().unwrap_or("unavailable")));
-        output.push_str(&format!("   Executable: {}\n", trace.root.executable.as_deref().unwrap_or("unavailable")));
-        output.push_str("   Child processes:\n");
-        if trace.descendants.is_empty() {
-            output.push_str("     (none observed)\n");
-        } else {
-            append_process_tree(&mut output, &trace.descendants, &trace.root.pid, "     ");
+        output.push_str(&format!("\n{}\n", paint(&format!("Agent: {label}"), "36", color)));
+        output.push_str(&format!("PID: {}\n", trace.root.pid));
+        output.push_str(&format!("Started: {}\n", format_local_time(trace.root.start_time.saturating_mul(1_000))));
+        output.push_str("Status: Running\n");
+        output.push_str(&format!("Working directory: {}\n", trace.root.working_directory.as_deref().unwrap_or("unavailable")));
+        output.push_str(&paint("\nLive Processes\n", "36", color));
+        output.push_str(&format!("{:<8} {:<30} {}\n", "PID", "Process", "Status"));
+        output.push_str(&format!("{:<8} {:<30} {}\n", trace.root.pid, label, paint("running", "32", color)));
+        let mut descendants: Vec<_> = trace.descendants.iter().collect();
+        descendants.sort_by(|left, right| left.depth.cmp(&right.depth)
+            .then_with(|| left.process.start_time.cmp(&right.process.start_time))
+            .then_with(|| left.process.pid.cmp(&right.process.pid)));
+        for descendant in descendants {
+            let process_name = process_display_name(&descendant.process);
+            let indentation = "  ".repeat(descendant.depth);
+            let name = format!("{indentation}{process_name}");
+            output.push_str(&format!(
+                "{:<8} {:<30} {}\n",
+                descendant.process.pid,
+                paint(&name, process_role_color(&process_name, None), color),
+                paint("running", "32", color),
+            ));
         }
+        output.push_str(&format!("Trace ID: {}\n", trace.trace_id));
     }
     output.push_str("\nLive activity (new process changes appear below)\n");
     output
 }
 
-fn append_process_tree(output: &mut String, descendants: &[TraceProcess], parent_pid: &str, prefix: &str) {
-    let children: Vec<_> = descendants
-        .iter()
-        .filter(|descendant| descendant.process.parent_pid.as_deref() == Some(parent_pid))
-        .collect();
-    for (index, descendant) in children.iter().enumerate() {
-        let last = index + 1 == children.len();
-        let branch = if last { "└─" } else { "├─" };
-        output.push_str(&format!(
-            "{prefix}{branch} {} · PID {} · PPID {}\n",
-            descendant.process.name,
-            descendant.process.pid,
-            descendant.process.parent_pid.as_deref().unwrap_or("unavailable")
-        ));
-        let nested_prefix = format!("{prefix}{}", if last { "   " } else { "│  " });
-        append_process_tree(output, descendants, &descendant.process.pid, &nested_prefix);
-    }
+fn watch_snapshot_json(traces: &[AgentTrace]) -> Value {
+    json!({
+        "type": "agenttrace.snapshot",
+        "agents": traces.iter().map(|trace| {
+            let label = trace.root.agent_type.expect("trace roots are detected agents").label();
+            let mut processes = vec![json!({
+                "pid": trace.root.pid,
+                "process": label,
+                "status": "running"
+            })];
+            let mut descendants: Vec<_> = trace.descendants.iter().collect();
+            descendants.sort_by(|left, right| left.depth.cmp(&right.depth)
+                .then_with(|| left.process.start_time.cmp(&right.process.start_time))
+                .then_with(|| left.process.pid.cmp(&right.process.pid)));
+            processes.extend(descendants.into_iter().map(|descendant| json!({
+                "pid": descendant.process.pid,
+                "process": process_display_name(&descendant.process),
+                "status": "running"
+            })));
+            json!({
+                "agent": label,
+                "pid": trace.root.pid,
+                "started_at": format_local_time(trace.root.start_time.saturating_mul(1_000)),
+                "status": "running",
+                "working_directory": trace.root.working_directory.as_deref().unwrap_or("unavailable"),
+                "live_processes": processes
+            })
+        }).collect::<Vec<_>>()
+    })
+}
+
+fn process_display_name(process: &ProcessRecord) -> String {
+    process.command_args.as_ref()
+        .map(|arguments| arguments.join(" "))
+        .filter(|arguments| !arguments.is_empty())
+        .unwrap_or_else(|| process.name.clone())
 }
 
 fn paint(text: &str, color_code: &str, color: bool) -> String {
@@ -1318,9 +1454,178 @@ fn paint(text: &str, color_code: &str, color: bool) -> String {
     }
 }
 
-fn format_utc_time(timestamp_unix_ms: u64) -> String {
-    let seconds_since_midnight = (timestamp_unix_ms / 1_000) % 86_400;
-    format!("{:02}:{:02}:{:02}Z", seconds_since_midnight / 3_600, (seconds_since_midnight / 60) % 60, seconds_since_midnight % 60)
+fn local_timestamp() -> String {
+    let parts = local_components(unix_time_millis()).unwrap_or_default();
+    let offset_minutes = parts.offset_seconds / 60;
+    let sign = if offset_minutes < 0 { '-' } else { '+' };
+    let absolute_offset = offset_minutes.unsigned_abs();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{sign}{:02}:{:02}",
+        parts.year,
+        parts.month,
+        parts.day,
+        parts.hour,
+        parts.minute,
+        parts.second,
+        absolute_offset / 60,
+        absolute_offset % 60
+    )
+}
+
+#[cfg(test)]
+fn has_iso8601_offset(timestamp: &str) -> bool {
+    let bytes = timestamp.as_bytes();
+    bytes.len() == 25
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && bytes[13] == b':'
+        && bytes[16] == b':'
+        && (bytes[19] == b'+' || bytes[19] == b'-')
+        && bytes[22] == b':'
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19 | 22) || byte.is_ascii_digit()
+        })
+}
+
+fn format_local_time(timestamp_unix_ms: u64) -> String {
+    local_components(timestamp_unix_ms)
+        .map(|parts| format!("{:02}:{:02}:{:02}", parts.hour, parts.minute, parts.second))
+        .unwrap_or_else(|| "--:--:--".to_string())
+}
+
+fn format_local_datetime(timestamp_unix_s: u64) -> String {
+    local_components(timestamp_unix_s.saturating_mul(1_000))
+        .map(|parts| format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn event_time(event: &Value, include_date: bool) -> String {
+    if let Some(timestamp) = event["timestamp"].as_str() {
+        if let Some(local_timestamp) = timestamp.get(..19) {
+            let separator = if include_date { ' ' } else { 'T' };
+            let value = local_timestamp.replace('T', &separator.to_string());
+            return if include_date { value } else { value.get(11..).unwrap_or("--:--:--").to_string() };
+        }
+    }
+    event["timestamp_unix_ms"]
+        .as_u64()
+        .map(|timestamp| {
+            if include_date {
+                local_components(timestamp)
+                    .map(|parts| format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second))
+                    .unwrap_or_else(|| "unknown".to_string())
+            } else {
+                format_local_time(timestamp)
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+#[derive(Default)]
+struct LocalDateTime {
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    offset_seconds: i32,
+}
+
+#[cfg(unix)]
+fn local_components(timestamp_unix_ms: u64) -> Option<LocalDateTime> {
+    let seconds = (timestamp_unix_ms / 1_000) as libc::time_t;
+    let mut result: libc::tm = unsafe { std::mem::zeroed() };
+    let converted = unsafe { libc::localtime_r(&seconds, &mut result) };
+    if converted.is_null() {
+        return None;
+    }
+    Some(LocalDateTime {
+        year: result.tm_year + 1900,
+        month: (result.tm_mon + 1) as u32,
+        day: result.tm_mday as u32,
+        hour: result.tm_hour as u32,
+        minute: result.tm_min as u32,
+        second: result.tm_sec as u32,
+        offset_seconds: result.tm_gmtoff as i32,
+    })
+}
+
+#[cfg(windows)]
+fn local_components(timestamp_unix_ms: u64) -> Option<LocalDateTime> {
+    let seconds = (timestamp_unix_ms / 1_000) as i64;
+    let mut result: libc::tm = unsafe { std::mem::zeroed() };
+    let converted = unsafe { _localtime64_s(&mut result, &seconds) };
+    if converted != 0 {
+        return None;
+    }
+    let mut timezone = 0 as libc::c_long;
+    let mut dst_bias = 0 as libc::c_long;
+    if unsafe { _get_timezone(&mut timezone) } != 0 || unsafe { _get_dstbias(&mut dst_bias) } != 0 {
+        return None;
+    }
+    let offset = -timezone - if result.tm_isdst > 0 { dst_bias } else { 0 };
+    Some(LocalDateTime {
+        year: result.tm_year + 1900,
+        month: (result.tm_mon + 1) as u32,
+        day: result.tm_mday as u32,
+        hour: result.tm_hour as u32,
+        minute: result.tm_min as u32,
+        second: result.tm_sec as u32,
+        offset_seconds: offset as i32,
+    })
+}
+
+#[cfg(windows)]
+unsafe extern "C" {
+    fn _localtime64_s(result: *mut libc::tm, time: *const i64) -> i32;
+    fn _get_timezone(seconds_west: *mut libc::c_long) -> i32;
+    fn _get_dstbias(seconds: *mut libc::c_long) -> i32;
+}
+
+#[cfg(not(any(unix, windows)))]
+fn local_components(_: u64) -> Option<LocalDateTime> {
+    None
+}
+
+fn traced_command(program: &str, arguments: &[String], include_arguments: bool) -> String {
+    if include_arguments && !arguments.is_empty() {
+        std::iter::once(program)
+            .chain(arguments.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ")
+    } else {
+        program.to_string()
+    }
+}
+
+fn check_started_data(command: &str, pid: u32, started_at: String) -> Value {
+    json!({
+        "command": command,
+        "requested_by": { "pid": std::process::id(), "process": "agenttrace" },
+        "pid": pid,
+        "started_at": started_at
+    })
+}
+
+fn check_completed_data(
+    command: &str,
+    pid: u32,
+    exit_code: Option<i32>,
+    started_at: String,
+    completed_at: String,
+    duration_ms: u64,
+) -> Value {
+    json!({
+        "command": command,
+        "requested_by": { "pid": std::process::id(), "process": "agenttrace" },
+        "pid": pid,
+        "exit_code": exit_code,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "duration_ms": duration_ms
+    })
 }
 
 fn unix_time_millis() -> u64 {
@@ -1339,6 +1644,8 @@ fn unix_time_nanos() -> u128 {
 
 fn print_history(arguments: &[String]) -> Result<(), String> {
     let mut path = PathBuf::from(DEFAULT_HISTORY_PATH);
+    let mut raw = false;
+    let mut pretty_json = false;
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].as_str() {
@@ -1346,14 +1653,142 @@ fn print_history(arguments: &[String]) -> Result<(), String> {
                 index += 1;
                 path = PathBuf::from(arguments.get(index).ok_or("--file requires a path")?);
             }
+            "--json" | "--raw" => raw = true,
+            "--pretty-json" => pretty_json = true,
             option => return Err(format!("unknown history option: {option}")),
         }
         index += 1;
     }
     let file = File::open(&path).map_err(|error| format!("cannot open history file {}: {error}", path.display()))?;
-    io::copy(&mut BufReader::new(file), &mut io::stdout())
+    let mut reader = BufReader::new(file);
+    if raw && pretty_json {
+        return Err("choose either --json or --pretty-json".to_string());
+    }
+    if raw {
+        io::copy(&mut reader, &mut io::stdout())
+            .map_err(|error| format!("cannot read history file {}: {error}", path.display()))?;
+        return Ok(());
+    }
+    let mut contents = String::new();
+    reader.read_to_string(&mut contents)
         .map_err(|error| format!("cannot read history file {}: {error}", path.display()))?;
+    let stdout = io::stdout();
+    let color = stdout.is_terminal() && env::var_os("NO_COLOR").is_none() && env::var("TERM").as_deref() != Ok("dumb");
+    let mut output = stdout.lock();
+    if pretty_json {
+        for (line_number, line) in contents.lines().enumerate() {
+            if line.trim().is_empty() { continue; }
+            let event: Value = serde_json::from_str(line)
+                .map_err(|error| format!("invalid JSONL at line {}: {error}", line_number + 1))?;
+            serde_json::to_writer_pretty(&mut output, &event)
+                .map_err(|error| format!("cannot format JSON event: {error}"))?;
+            writeln!(output, "\n").map_err(|error| format!("cannot write JSON separator: {error}"))?;
+        }
+        return Ok(());
+    }
+    writeln!(output, "{}\n", paint("AgentTrace History", "36", color))
+        .map_err(|error| format!("cannot write history header: {error}"))?;
+    for (line_number, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: Value = serde_json::from_str(line)
+            .map_err(|error| format!("invalid JSONL at line {}: {error}", line_number + 1))?;
+        writeln!(output, "{}", render_history_event(&event, color))
+            .map_err(|error| format!("cannot write history event: {error}"))?;
+    }
     Ok(())
+}
+
+fn history_event_label(event: &Value) -> (String, String, String) {
+    let event_type = event["event_type"].as_str().or(event["type"].as_str()).unwrap_or("event");
+    let data = event_payload(event);
+    match event_type {
+        "process_started" | "process_discovered" => (
+            "process.started".to_string(),
+            data["executable"].as_str().or(data["process_name"].as_str()).unwrap_or("process").to_string(),
+            "36".to_string(),
+        ),
+        "process_exited" => {
+            let exit_code = data["exit_code"].as_i64();
+            let color = if exit_code.is_some_and(|code| code != 0) { "31" } else { "32" };
+            (
+                "process.exited".to_string(),
+                data["executable"].as_str().or(data["process_name"].as_str()).unwrap_or("process").to_string(),
+                color.to_string(),
+            )
+        }
+        "process_updated" => ("process.updated".to_string(), data["process_name"].as_str().unwrap_or("process").to_string(), "36".to_string()),
+        "process_unobserved" => ("process.unobserved".to_string(), data["process_name"].as_str().unwrap_or("process").to_string(), "36".to_string()),
+        "check.started" => ("check.started".to_string(), data["command"].as_str().unwrap_or("command").to_string(), "33".to_string()),
+        "check.completed" => {
+            let code = data["exit_code"].as_i64();
+            ("check.completed".to_string(), data["command"].as_str().unwrap_or("command").to_string(), if code == Some(0) { "32" } else { "31" }.to_string())
+        }
+        "stream_activity" => {
+            let stream = data["stream"].as_str().unwrap_or("unknown");
+            let bytes = data["byte_count"].as_u64().unwrap_or_default();
+            ("stream.activity".to_string(), format!("{stream} · {bytes} bytes"), "90".to_string())
+        }
+        "file_changed" => {
+            let action = data["action"].as_str().unwrap_or("changed");
+            (format!("file.{action}"), data["path"].as_str().unwrap_or("file").to_string(), "35".to_string())
+        }
+        "collector_status" | "session_failed" => (event_type.replace('_', "."), data["reason"].as_str().or(data["status"].as_str()).unwrap_or("status").to_string(), "31".to_string()),
+        "session_started" => ("session.started".to_string(), data["collector"].as_str().unwrap_or("session").to_string(), "36".to_string()),
+        "session_stopped" => ("session.stopped".to_string(), data["reason"].as_str().unwrap_or("complete").to_string(), "90".to_string()),
+        _ => (event_type.replace('_', "."), data.to_string(), "90".to_string()),
+    }
+}
+
+fn render_history_event(event: &Value, color: bool) -> String {
+    let (label, subject, color_code) = history_event_label(event);
+    let data = event_payload(event);
+    let pid = data["pid"].as_u64().map(|pid| pid.to_string())
+        .or_else(|| data["process_identity"]["pid"].as_str().map(str::to_string))
+        .or_else(|| data["process_identity"]["pid"].as_u64().map(|pid| pid.to_string()));
+    let mut detail = pid.map(|pid| format!("PID {pid}")).unwrap_or_default();
+    if let Some(exit_code) = data["exit_code"].as_i64() {
+        if !detail.is_empty() { detail.push_str("  "); }
+        detail.push_str(&format!("exit {exit_code}"));
+    }
+    if let Some(duration) = data["duration_ms"].as_u64() {
+        if !detail.is_empty() { detail.push_str("  "); }
+        detail.push_str(&format!("{} ms", duration));
+    }
+    let subject_color = match label.as_str() {
+        "process.started" | "process.exited" | "process.updated" | "process.unobserved" => {
+            process_role_color(subject.as_str(), data["agent_type"].as_str())
+        }
+        _ => color_code.as_str(),
+    };
+    let time = paint(&event_time(event, true), "90", color);
+    let event_name = paint(&format!("{label:<18}"), &color_code, color);
+    let subject = paint(&subject, subject_color, color);
+    format!("{time}  {event_name} {subject}{}",
+        if detail.is_empty() { String::new() } else { format!("  {}", paint(&detail, "90", color)) })
+}
+
+fn event_payload(event: &Value) -> &Value {
+    event.get("data").filter(|data| !data.is_null()).unwrap_or(event)
+}
+
+fn process_role_color(process: &str, agent_type: Option<&str>) -> &'static str {
+    if agent_type.is_some() {
+        return "36";
+    }
+    let process = process.split_whitespace().next().unwrap_or(process).trim_matches(['"', '\'']);
+    let executable = Path::new(process)
+        .file_name()
+        .unwrap_or_else(|| OsStr::new(process))
+        .to_string_lossy()
+        .trim_end_matches(".exe")
+        .to_ascii_lowercase();
+    match executable.as_str() {
+        "cmd" | "powershell" | "pwsh" | "sh" | "bash" | "zsh" | "npm" | "npx" | "cargo" | "git" => "33",
+        "node" | "python" | "python3" | "ruby" | "java" | "deno" | "bun" => "34",
+        _ => "90",
+    }
 }
 
 fn build_traces(processes: &[ProcessRecord]) -> Vec<AgentTrace> {
@@ -1461,10 +1896,11 @@ fn instance_key(pid: &str, start_time: u64) -> String {
 }
 
 fn print_help() {
-    println!("TRACE USAGE: agenttrace trace [--output PATH] [--cwd PATH] [--include-command-args] [--capture-streams] -- PROGRAM [ARGS...]");
-    println!("TRACE OPTIONS: --output PATH; --cwd PATH; --include-command-args (sensitive); --capture-streams (up to 10 MiB per stream, sensitive); --watch-files (workspace metadata changes)\n");
+    println!("TRACE USAGE: agenttrace trace [--check] [--output PATH] [--cwd PATH] [--include-command-args] [--capture-streams] -- PROGRAM [ARGS...]");
+    println!("TRACE OPTIONS: --check (record command lifecycle); --output PATH; --cwd PATH; --include-command-args (sensitive); --capture-streams (up to 10 MiB per stream, sensitive); --watch-files (workspace metadata changes)\n");
     println!("WATCH ALIAS: `agenttrace run --watch [WATCH OPTIONS]` is equivalent to `agenttrace watch [WATCH OPTIONS]`.\n");
-    println!("WATCH OUTPUT: defaults to indented readable events; use `--format json` for JSONL stdout. Color is automatic and disabled by `NO_COLOR`.\n");
+    println!("WATCH OUTPUT: defaults to readable events; use `--json` for compact JSONL or `--pretty-json` for indented JSON records. Color is disabled in JSON modes and by `NO_COLOR`.\n");
+    println!("HISTORY OUTPUT: `agenttrace history` shows a colored timeline; use `--json` for original JSONL or `--pretty-json` for indented JSON records.\n");
     println!("AgentTrace — discover running AI coding-agent processes\n");
     println!("USAGE:\n    agenttrace [run]\n    agenttrace watch [--output PATH] [--interval-ms MS] [--duration-ms MS] [--include-command-args]\n    agenttrace history [--file PATH]\n\nCOMMANDS:\n    run       Take a one-time process snapshot (default)\n    watch     Stream process lifecycle events and append JSONL history\n    history   Print recorded JSONL history\n\nWATCH OPTIONS:\n    --output PATH            History file (default: .agenttrace/history.jsonl)\n    --interval-ms MS         Poll interval, at least 100 ms (default: 1000)\n    --duration-ms MS         Stop after a bounded recording session\n    --include-command-args   Persist raw command arguments; may expose secrets\n\nOPTIONS:\n    -h, --help    Print this help message");
 }
@@ -1597,8 +2033,145 @@ mod tests {
 
         let json_format = vec!["--format".to_string(), "json".to_string()];
         assert_eq!(parse_watch_options(&json_format).unwrap().format, WatchOutputFormat::Json);
+        let json_flag = vec!["--json".to_string()];
+        assert_eq!(parse_watch_options(&json_flag).unwrap().format, WatchOutputFormat::Json);
+        let pretty_json = vec!["--pretty-json".to_string()];
+        assert_eq!(parse_watch_options(&pretty_json).unwrap().format, WatchOutputFormat::PrettyJson);
         let invalid_format = vec!["--format".to_string(), "xml".to_string()];
         assert!(parse_watch_options(&invalid_format).is_err());
+    }
+
+    #[test]
+    fn timestamps_keep_iso8601_offsets_and_render_as_local_clock_time() {
+        let timestamp = local_timestamp();
+        assert!(has_iso8601_offset(&timestamp));
+        assert!(timestamp.as_bytes().get(19).is_some_and(|byte| *byte == b'+' || *byte == b'-'));
+        assert_eq!(format_local_time(1_000), local_components(1_000).map(|parts| format!("{:02}:{:02}:{:02}", parts.hour, parts.minute, parts.second)).unwrap());
+    }
+
+    #[test]
+    fn check_lifecycle_records_success_and_failure_details() {
+        for exit_code in [Some(0), Some(7)] {
+            let started = "2026-10-04T20:51:12+01:00".to_string();
+            let completed = "2026-10-04T20:51:18+01:00".to_string();
+            let start = check_started_data("npm test", 8142, started.clone());
+            let finish = check_completed_data("npm test", 8142, exit_code, started.clone(), completed.clone(), 6_000);
+            assert_eq!(start["command"], "npm test");
+            assert_eq!(start["requested_by"]["process"], "agenttrace");
+            assert_eq!(start["pid"], 8142);
+            assert_eq!(start["started_at"], started);
+            assert_eq!(finish["exit_code"], json!(exit_code));
+            assert_eq!(finish["completed_at"], completed);
+            assert_eq!(finish["duration_ms"], 6_000);
+            assert_eq!(history_event_label(&json!({"event_type":"check.completed", "data":finish})).2, if exit_code == Some(0) { "32" } else { "31" });
+        }
+    }
+
+    #[test]
+    fn supervised_check_writes_started_and_completed_events_for_zero_and_nonzero_exit() {
+        for exit_code in [0, 7] {
+            let history_path = env::temp_dir().join(format!("agenttrace-check-{}-{}-{exit_code}.jsonl", std::process::id(), unix_time_nanos()));
+            let mut arguments = vec![
+                "--check".to_string(),
+                "--output".to_string(),
+                history_path.display().to_string(),
+                "--".to_string(),
+            ];
+            #[cfg(windows)]
+            arguments.extend(["cmd.exe".to_string(), "/C".to_string(), format!("exit {exit_code}")]);
+            #[cfg(unix)]
+            arguments.extend(["sh".to_string(), "-c".to_string(), format!("exit {exit_code}")]);
+
+            assert_eq!(trace_command(&arguments).unwrap(), exit_code);
+            let events: Vec<Value> = fs::read_to_string(&history_path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let started = events.iter().find(|event| event["type"] == "check.started").unwrap();
+            let completed = events.iter().find(|event| event["type"] == "check.completed").unwrap();
+            assert_eq!(started["pid"], completed["pid"]);
+            assert_eq!(completed["exit_code"], exit_code);
+            assert!(has_iso8601_offset(started["started_at"].as_str().unwrap()));
+            assert!(has_iso8601_offset(completed["started_at"].as_str().unwrap()));
+            assert!(has_iso8601_offset(completed["completed_at"].as_str().unwrap()));
+            assert!(completed["duration_ms"].is_number());
+            assert!(completed.get("data").is_none());
+            assert!(completed["command"].as_str().is_some_and(|command| !command.is_empty()));
+            assert!(events.iter().all(|event| event["timestamp"].is_string()));
+            fs::remove_file(history_path).unwrap();
+        }
+    }
+
+    #[test]
+    fn history_renderer_formats_legacy_and_current_jsonl_events_without_ansi_by_default() {
+        let old_event = json!({
+            "timestamp_unix_ms": 1_000,
+            "event_type": "file_changed",
+            "data": { "path": "src/auth.js", "action": "modified" }
+        });
+        let old_line = render_history_event(&old_event, false);
+        assert!(old_line.contains("file.modified"));
+        assert!(old_line.contains("src/auth.js"));
+        assert!(!old_line.contains("\x1b["));
+
+        let check = json!({
+            "timestamp": "2026-10-04T20:51:18+01:00",
+            "event_type": "check.completed",
+            "data": { "command": "npm test", "pid": 8142, "exit_code": 0, "duration_ms": 6000 }
+        });
+        let line = render_history_event(&check, false);
+        assert!(line.starts_with("2026-10-04 20:51:18"));
+        assert!(line.contains("check.completed"));
+        assert!(line.contains("npm test"));
+        assert!(line.contains("PID 8142"));
+        assert!(line.contains("exit 0"));
+        assert!(!line.contains("\x1b["));
+        let colored = render_history_event(&check, true);
+        assert!(colored.contains("\x1b[32mcheck.completed"));
+        assert!(colored.contains("\x1b[32mnpm test"));
+    }
+
+    #[test]
+    fn history_colors_command_and_runtime_process_subjects_differently() {
+        let command = json!({
+            "timestamp_unix_ms": 1_000,
+            "event_type": "process_discovered",
+            "data": { "process_name": "cmd.exe", "process_identity": { "pid": "1" } }
+        });
+        let runtime = json!({
+            "timestamp_unix_ms": 1_000,
+            "event_type": "process_discovered",
+            "data": { "process_name": "node.exe", "process_identity": { "pid": "2" } }
+        });
+        assert!(render_history_event(&command, true).contains("\x1b[33mcmd.exe"));
+        assert!(render_history_event(&runtime, true).contains("\x1b[34mnode.exe"));
+        assert_ne!(process_role_color("cmd.exe", None), process_role_color("node.exe", None));
+    }
+
+    #[test]
+    fn pretty_json_watch_output_indents_each_record_without_changing_jsonl_history() {
+        let mut history = Vec::new();
+        let mut output = Vec::new();
+        let mut sequence = 0;
+        write_event(
+            &mut history,
+            &mut output,
+            "session-test",
+            &mut sequence,
+            "process_discovered",
+            json!({ "process_name": "node.exe", "process_identity": { "pid": "42" } }),
+            WatchOutputFormat::PrettyJson,
+            true,
+            true,
+        ).unwrap();
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("\n  \"event_type\""));
+        assert!(!rendered.contains("\x1b["));
+        assert_eq!(rendered.lines().filter(|line| line.trim() == "{").count(), 1);
+        let history_line = String::from_utf8(history).unwrap();
+        assert_eq!(history_line.lines().count(), 1);
+        serde_json::from_str::<Value>(history_line.trim()).unwrap();
     }
 
     #[test]
@@ -1615,9 +2188,9 @@ mod tests {
             }
         });
         let plain = render_watch_event(&event, false);
-        assert_eq!(plain, "[00007] 00:00:01Z     + node (PID 42) · Codex");
+        assert_eq!(plain, format!("[00007] {}     process.started    node (PID 42) · Codex", format_local_time(1_000)));
         assert!(!plain.contains("\x1b["));
-        assert!(render_watch_event(&event, true).contains("\x1b[32m"));
+        assert!(render_watch_event(&event, true).contains("\x1b[36m"));
     }
 
     #[test]
@@ -1631,9 +2204,27 @@ mod tests {
         assert!(output.contains("Watching 1 agent · polling every 1000 ms · run watch-run-1"));
         assert!(output.contains("Trace ID: trace-100:1700000000"));
         assert!(output.contains("Working directory: C:/repo"));
-        assert!(output.contains("Child processes:"));
-        assert!(output.contains("PID 101"));
+        assert!(output.contains("Live Processes"));
+        assert!(output.contains("PID      Process                        Status"));
+        assert!(output.contains("running"));
+        assert!(output.contains("101"));
         assert!(output.contains("Live activity"));
+    }
+
+    #[test]
+    fn pretty_json_watch_snapshot_contains_agent_metadata_and_live_processes() {
+        let root = process_record("100", Some("50"), Some(AgentType::Codex), 1_700_000_000, Some("C:/repo"));
+        let child = process_record("101", Some("100"), None, 1_700_000_010, None);
+        let snapshot = watch_snapshot_json(&build_traces(&[root, child]));
+
+        assert_eq!(snapshot["type"], "agenttrace.snapshot");
+        assert_eq!(snapshot["agents"][0]["agent"], "Codex");
+        assert_eq!(snapshot["agents"][0]["pid"], "100");
+        assert_eq!(snapshot["agents"][0]["status"], "running");
+        assert_eq!(snapshot["agents"][0]["working_directory"], "C:/repo");
+        assert_eq!(snapshot["agents"][0]["live_processes"][0]["pid"], "100");
+        assert_eq!(snapshot["agents"][0]["live_processes"][1]["pid"], "101");
+        assert_eq!(snapshot["agents"][0]["live_processes"][1]["status"], "running");
     }
 
     #[test]
@@ -1647,14 +2238,16 @@ mod tests {
         let traces = build_traces(&processes);
         let output = render_watch_snapshot(&traces, "watch-run-1", Duration::from_secs(1), false);
 
-        assert!(output.contains("├─ test-process · PID 101"));
-        assert!(output.contains("│  └─ test-process · PID 103"));
-        assert!(output.contains("└─ test-process · PID 102"));
+        assert!(output.contains("101"));
+        assert!(output.contains("103"));
+        assert!(output.contains("102"));
     }
 
     #[test]
-    fn watch_event_time_uses_utc_clock_format() {
-        assert_eq!(format_utc_time(86_401_000), "00:00:01Z");
+    fn watch_event_time_uses_local_clock_format() {
+        let parts = local_components(1_000).unwrap();
+        let expected = format!("{:02}:{:02}:{:02}", parts.hour, parts.minute, parts.second);
+        assert_eq!(format_local_time(1_000), expected);
     }
 
     #[test]
@@ -1674,6 +2267,7 @@ mod tests {
     #[test]
     fn trace_options_separate_agenttrace_flags_from_target_arguments() {
         let arguments = vec![
+            "--check".to_string(),
             "--capture-streams".to_string(),
             "--watch-files".to_string(),
             "--output".to_string(),
@@ -1685,6 +2279,7 @@ mod tests {
         let options = parse_trace_options(&arguments).unwrap();
         assert!(options.capture_streams);
         assert!(options.watch_files);
+        assert!(options.check);
         assert_eq!(options.output, PathBuf::from("events.jsonl"));
         assert_eq!(options.program, "sample");
         assert_eq!(options.arguments, vec!["--help"]);
@@ -1818,6 +2413,8 @@ mod tests {
         assert_eq!(events[0]["collector"], "sysinfo_polling");
         assert!(events[0].get("observed_at_unix_ms").is_some());
         assert_eq!(events[0]["data"]["process_identity"]["pid"], "100");
+        assert!(has_iso8601_offset(events[0]["timestamp"].as_str().unwrap()));
+        assert!(!String::from_utf8(stream).unwrap().contains("\x1b["));
         assert!(events[0]["data"].get("command_args").is_none());
         assert_eq!(events[1]["event_type"], "process_updated");
         assert_eq!(events[2]["event_type"], "process_unobserved");
