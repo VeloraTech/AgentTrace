@@ -13,6 +13,8 @@ use std::process::{Command, Stdio};
 use serde_json::{json, Value};
 use sysinfo::{Process, System};
 
+mod nativerelay;
+
 const DEFAULT_HISTORY_PATH: &str = ".agenttrace/history.jsonl";
 const DEFAULT_INTERVAL_MS: u64 = 1_000;
 const MIN_INTERVAL_MS: u64 = 100;
@@ -109,6 +111,7 @@ fn run_watch_options(arguments: &[String]) -> Result<Option<&[String]>, String> 
     match arguments.first().map(String::as_str) {
         None => Ok(None),
         Some("--watch") => Ok(Some(&arguments[1..])),
+        Some("--native-relay") => Ok(Some(arguments)),
         Some(option) => Err(format!("unknown run option: {option}; use `agenttrace watch` for live polling")),
     }
 }
@@ -203,6 +206,7 @@ struct WatchOptions {
     duration: Option<Duration>,
     include_command_args: bool,
     format: WatchOutputFormat,
+    native_relay: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -898,6 +902,8 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
         .open(&options.output)
         .map_err(|error| format!("cannot open history file {}: {error}", options.output.display()))?;
     let mut history = BufWriter::new(file);
+    let mut native_relay = if options.native_relay { Some(nativerelay::Process::spawn()?) } else { None };
+    let native_relay_pid = native_relay.as_ref().map(nativerelay::Process::id);
     let running = Arc::new(AtomicBool::new(true));
     let signal_state = Arc::clone(&running);
     ctrlc::set_handler(move || signal_state.store(false, Ordering::SeqCst))
@@ -919,6 +925,7 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
         json!({
             "collector": "sysinfo_polling",
             "history_file": options.output,
+            "native_relay": { "enabled": options.native_relay, "child_pid": native_relay_pid, "command": if options.native_relay { Some("nativerelay run --format json") } else { None } },
             "poll_interval_ms": options.interval.as_millis(),
             "duration_ms": options.duration.map(|duration| duration.as_millis()),
             "command_args_recorded": options.include_command_args,
@@ -928,7 +935,9 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
                 "stdin": false,
                 "stdout": false,
                 "stderr": false,
-                "file_events": false
+                "file_events": if options.native_relay { "native_relay_best_effort_linux_scoped" } else { "disabled" },
+                "native_relay": options.native_relay,
+                "native_relay_loss_reporting": options.native_relay
             }
         }),
         options.format,
@@ -948,9 +957,25 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
     let started_at = Instant::now();
     let mut stop_reason = "ctrl_c";
     let mut initial_snapshot = true;
+    let mut native_incomplete = false;
+    let mut native_stdout_eof = false;
+    let mut native_stderr_eof = false;
+    let mut native_exit: Option<std::process::ExitStatus> = None;
+    let mut native_sequences = HashMap::new();
     loop {
         if !running.load(Ordering::SeqCst) {
             break;
+        }
+        if let Some(adapter) = native_relay.as_ref() {
+            consume_native_messages(adapter, &mut history, &mut stdout, &session_id, &mut sequence, options.format, color, &mut native_incomplete, &mut native_stdout_eof, &mut native_stderr_eof, &mut native_sequences)?;
+        }
+        if let Some(adapter) = native_relay.as_mut() {
+            if let Some(status) = adapter.try_wait().map_err(|error| format!("cannot wait for NativeRelay: {error}"))? {
+                native_exit = Some(status);
+                native_incomplete = true;
+                stop_reason = "native_relay_exited";
+                break;
+            }
         }
         if options.duration.is_some_and(|duration| started_at.elapsed() >= duration) {
             stop_reason = "duration_elapsed";
@@ -994,9 +1019,34 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
         }
         while !remaining.is_zero() && running.load(Ordering::SeqCst) {
             let pause = remaining.min(Duration::from_millis(100));
+            if let Some(adapter) = native_relay.as_ref() {
+                consume_native_messages(adapter, &mut history, &mut stdout, &session_id, &mut sequence, options.format, color, &mut native_incomplete, &mut native_stdout_eof, &mut native_stderr_eof, &mut native_sequences)?;
+            }
+            if let Some(adapter) = native_relay.as_mut() {
+                if let Some(status) = adapter.try_wait().map_err(|error| format!("cannot wait for NativeRelay: {error}"))? {
+                    native_exit = Some(status);
+                    native_incomplete = true;
+                    stop_reason = "native_relay_exited";
+                    running.store(false, Ordering::SeqCst);
+                    break;
+                }
+            }
             thread::sleep(pause);
             remaining = remaining.saturating_sub(pause);
         }
+    }
+
+    if let Some(adapter) = native_relay.as_mut() {
+        if native_exit.is_none() {
+            native_exit = Some(adapter.shutdown().map_err(|error| format!("cannot shut down NativeRelay: {error}"))?);
+        }
+        let drain_deadline = Instant::now() + Duration::from_secs(2);
+        while !(native_stdout_eof && native_stderr_eof) && Instant::now() < drain_deadline {
+            if let Some(message) = adapter.recv_timeout(Duration::from_millis(100)) {
+                consume_native_message(message, &mut history, &mut stdout, &session_id, &mut sequence, options.format, color, &mut native_incomplete, &mut native_stdout_eof, &mut native_stderr_eof, &mut native_sequences)?;
+            }
+        }
+        if !(native_stdout_eof && native_stderr_eof) { native_incomplete = true; }
     }
 
     write_event(
@@ -1005,12 +1055,98 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
         &session_id,
         &mut sequence,
         "session_stopped",
-        json!({ "reason": stop_reason }),
+        json!({ "reason": stop_reason, "native_relay_enabled": options.native_relay, "native_relay_exit_code": native_exit.as_ref().and_then(std::process::ExitStatus::code), "observations_lost_or_incomplete": native_incomplete, "trace_complete": !native_incomplete }),
         options.format,
         color,
         true,
     )
     .map_err(|error| format!("cannot write session stop event: {error}"))?;
+    if let Some(status) = native_exit.filter(|status| !status.success()) {
+        return Err(format!("NativeRelay exited with {status}; its diagnostics were written to stderr and the AgentTrace trace may be incomplete"));
+    }
+    Ok(())
+}
+
+fn consume_native_messages(
+    adapter: &nativerelay::Process,
+    history: &mut impl Write,
+    stdout: &mut impl Write,
+    session_id: &str,
+    sequence: &mut u64,
+    format: WatchOutputFormat,
+    color: bool,
+    incomplete: &mut bool,
+    stdout_eof: &mut bool,
+    stderr_eof: &mut bool,
+    previous_sequences: &mut HashMap<String, u64>,
+) -> Result<(), String> {
+    while let Some(message) = adapter.try_message() {
+        consume_native_message(message, history, stdout, session_id, sequence, format, color, incomplete, stdout_eof, stderr_eof, previous_sequences)?;
+    }
+    Ok(())
+}
+
+fn consume_native_message(
+    message: nativerelay::Message,
+    history: &mut impl Write,
+    stdout: &mut impl Write,
+    session_id: &str,
+    sequence: &mut u64,
+    format: WatchOutputFormat,
+    color: bool,
+    incomplete: &mut bool,
+    stdout_eof: &mut bool,
+    stderr_eof: &mut bool,
+    previous_sequences: &mut HashMap<String, u64>,
+) -> Result<(), String> {
+    match message {
+        nativerelay::Message::Record(record) => {
+            let record_type = record["record_type"].as_str();
+            let native_type = record["type"].as_str();
+            let event_type = match record_type {
+                Some("nativerelay.loss") => { *incomplete = true; "native_relay.loss" }
+                Some("nativerelay.status") => {
+                    if !matches!(record["state"].as_str(), Some("running" | "stopped")) { *incomplete = true; }
+                    "native_relay.status"
+                }
+                Some(_) => { *incomplete = true; "native_relay.unsupported_record" }
+                None if native_type.is_some() => {
+                    let known = matches!(native_type, Some("process.started" | "process.exited" | "file.opened" | "file.created" | "file.modified" | "file.deleted" | "file.renamed"));
+                    if !known { *incomplete = true; }
+                    if let Some(source) = record["collector"].as_str() {
+                        if let Some(current) = record["sequence"].as_u64() {
+                            if let Some(previous) = previous_sequences.insert(source.to_string(), current) {
+                                if current != previous.saturating_add(1) {
+                                    *incomplete = true;
+                                    write_event(history, stdout, session_id, sequence, "native_relay.sequence_gap", json!({ "source_collector": source, "previous_sequence": previous, "observed_sequence": current, "native_record": record }), format, color, true)
+                                        .map_err(|error| format!("cannot write NativeRelay sequence gap: {error}"))?;
+                                }
+                            }
+                        }
+                    }
+                    if known { "native_relay.observation" } else { "native_relay.unsupported_record" }
+                }
+                None => { *incomplete = true; "native_relay.unsupported_record" }
+            };
+            write_event(history, stdout, session_id, sequence, event_type, json!({ "native_record": record }), format, color, true)
+                .map_err(|error| format!("cannot write NativeRelay observation: {error}"))?;
+        }
+        nativerelay::Message::Malformed { line, error, raw } => {
+            *incomplete = true;
+            eprintln!("NativeRelay stdout line {line} was malformed: {error}");
+            write_event(history, stdout, session_id, sequence, "native_relay.malformed_record", json!({ "line": line, "error": error, "raw": raw }), format, color, true)
+                .map_err(|error| format!("cannot write malformed NativeRelay record: {error}"))?;
+        }
+        nativerelay::Message::Stderr(diagnostic) => eprintln!("NativeRelay: {diagnostic}"),
+        nativerelay::Message::StdoutEof => { *stdout_eof = true; }
+        nativerelay::Message::StderrEof => { *stderr_eof = true; }
+        nativerelay::Message::ReadError(error) => {
+            *incomplete = true;
+            eprintln!("NativeRelay stdout read failed: {error}");
+            write_event(history, stdout, session_id, sequence, "native_relay.read_error", json!({ "error": error }), format, color, true)
+                .map_err(|error| format!("cannot write NativeRelay read error: {error}"))?;
+        }
+    }
     Ok(())
 }
 
@@ -1020,6 +1156,7 @@ fn parse_watch_options(arguments: &[String]) -> Result<WatchOptions, String> {
     let mut duration_ms = None;
     let mut include_command_args = false;
     let mut format = WatchOutputFormat::Pretty;
+    let mut native_relay = false;
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].as_str() {
@@ -1053,6 +1190,7 @@ fn parse_watch_options(arguments: &[String]) -> Result<WatchOptions, String> {
                 duration_ms = Some(duration);
             }
             "--include-command-args" => include_command_args = true,
+            "--native-relay" => native_relay = true,
             "--json" => format = WatchOutputFormat::Json,
             "--pretty-json" => format = WatchOutputFormat::PrettyJson,
             "--format" => {
@@ -1075,6 +1213,7 @@ fn parse_watch_options(arguments: &[String]) -> Result<WatchOptions, String> {
         duration: duration_ms.map(Duration::from_millis),
         include_command_args,
         format,
+        native_relay,
     })
 }
 
@@ -1898,7 +2037,7 @@ fn instance_key(pid: &str, start_time: u64) -> String {
 fn print_help() {
     println!("TRACE USAGE: agenttrace trace [--check] [--output PATH] [--cwd PATH] [--include-command-args] [--capture-streams] -- PROGRAM [ARGS...]");
     println!("TRACE OPTIONS: --check (record command lifecycle); --output PATH; --cwd PATH; --include-command-args (sensitive); --capture-streams (up to 10 MiB per stream, sensitive); --watch-files (workspace metadata changes)\n");
-    println!("WATCH ALIAS: `agenttrace run --watch [WATCH OPTIONS]` is equivalent to `agenttrace watch [WATCH OPTIONS]`.\n");
+    println!("WATCH ALIAS: `agenttrace run --watch [WATCH OPTIONS]` is equivalent to `agenttrace watch [WATCH OPTIONS]`. Add `--native-relay` to start NativeRelay 0.2.0.\n");
     println!("WATCH OUTPUT: defaults to readable events; use `--json` for compact JSONL or `--pretty-json` for indented JSON records. Color is disabled in JSON modes and by `NO_COLOR`.\n");
     println!("HISTORY OUTPUT: `agenttrace history` shows a colored timeline; use `--json` for original JSONL or `--pretty-json` for indented JSON records.\n");
     println!("AgentTrace — discover running AI coding-agent processes\n");
@@ -2260,6 +2399,9 @@ mod tests {
         let forwarded = run_watch_options(&arguments).unwrap().unwrap();
         assert_eq!(forwarded, &["--duration-ms", "2000"]);
         assert_eq!(parse_watch_options(forwarded).unwrap().duration, Some(Duration::from_secs(2)));
+        let native = vec!["--native-relay".to_string()];
+        let forwarded = run_watch_options(&native).unwrap().unwrap();
+        assert!(parse_watch_options(forwarded).unwrap().native_relay);
         assert!(run_watch_options(&[]).unwrap().is_none());
         assert!(run_watch_options(&["--unknown".to_string()]).is_err());
     }
@@ -2462,4 +2604,32 @@ mod tests {
             command_args: None,
         }
     }
+    #[test]
+    fn native_relay_records_use_the_existing_jsonl_recorder_and_preserve_gaps() {
+        let mut history = Vec::new(); let mut stdout = Vec::new(); let mut seq = 0;
+        let mut incomplete = false; let mut eof = false; let mut stderr_eof = false; let mut source_sequences = HashMap::new();
+        for native_sequence in [12, 14] {
+            let record = json!({"schema_version":1,"id":format!("evt-{native_sequence}"),"timestamp":"2026-10-07T12:00:00Z","type":"file.opened","platform":"linux","collector":"fanotify","sequence":native_sequence,"process":{"pid":42},"resource":{"type":"file","path":"/tmp/secret.txt"},"metadata":{"flag":"kept"},"evidence":"observed"});
+            consume_native_message(nativerelay::Message::Record(record), &mut history, &mut stdout, "session", &mut seq, WatchOutputFormat::Json, false, &mut incomplete, &mut eof, &mut stderr_eof, &mut source_sequences).unwrap();
+        }
+        let events: Vec<Value> = String::from_utf8(history).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(events.iter().map(|event| event["event_type"].as_str().unwrap()).collect::<Vec<_>>(), vec!["native_relay.observation", "native_relay.sequence_gap", "native_relay.observation"]);
+        assert_eq!(events[0]["data"]["native_record"]["id"], "evt-12");
+        assert_eq!(events[0]["data"]["native_record"]["sequence"], 12);
+        assert_eq!(events[0]["data"]["native_record"]["resource"]["path"], "/tmp/secret.txt");
+        assert!(incomplete);
+    }
+
+    #[test]
+    fn native_relay_loss_marks_agenttrace_history_incomplete() {
+        let mut history = Vec::new(); let mut stdout = Vec::new(); let mut seq = 0;
+        let mut incomplete = false; let mut eof = false; let mut stderr_eof = false; let mut source_sequences = HashMap::new();
+        let record = nativerelay::parse_record(r#"{"schema_version":1,"record_type":"nativerelay.loss","timestamp":"2026-10-07T12:00:00Z","loss_generation":3,"losses":{"fanotify":{"overflow":{"known_dropped":0,"unknown_count":true}}}}"#).unwrap();
+        consume_native_message(nativerelay::Message::Record(record), &mut history, &mut stdout, "session", &mut seq, WatchOutputFormat::Json, false, &mut incomplete, &mut eof, &mut stderr_eof, &mut source_sequences).unwrap();
+        let event: Value = serde_json::from_slice(history.split(|byte| *byte == b'\n').next().unwrap()).unwrap();
+        assert_eq!(event["event_type"], "native_relay.loss");
+        assert_eq!(event["data"]["native_record"]["loss_generation"], 3);
+        assert!(incomplete);
+    }
+
 }

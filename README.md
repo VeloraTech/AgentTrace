@@ -35,6 +35,7 @@ For process discovery, command arguments are inspected in memory for detection b
 
 - Rust stable and Cargo
 - On Windows, the Rust MSVC toolchain and its Visual Studio C++ build tools
+- Optional live native observations: NativeRelay 0.2.0 (`pip install nativerelay==0.2.0`); its native collector currently supports Linux only
 
 ## Run locally
 
@@ -42,7 +43,16 @@ For process discovery, command arguments are inspected in memory for detection b
 cargo run -- run
 ```
 
-Omitting `run` takes the same discovery snapshot. Start an agent first, leave it running, then launch this command in another terminal to see whether it is detected.
+Omitting `run` takes the same discovery snapshot. Start an agent first, leave it running, then launch this command in another terminal to see whether it is detected. The `--native-relay` development option switches `run` into the existing JSONL recording path and starts NativeRelay as a child:
+
+```powershell
+cargo run -- run --native-relay
+cargo run -- watch --native-relay
+```
+
+AgentTrace directly launches `nativerelay run --format json`, reads stdout incrementally as JSONL, and captures stderr separately for diagnostics. NativeRelay events and control records are wrapped in AgentTrace history events without dropping their original fields, IDs, timestamps, sequences, process/resource data, evidence, metadata, or loss details. Reported loss, sequence gaps, malformed records, degraded/unavailable status, and unexpected child exit mark the recording incomplete. Ctrl+C asks NativeRelay to stop, drains buffered stdout, waits for the child, then records the AgentTrace session stop. NativeRelay itself is not removed from observed events; AgentTrace's existing detectors do not classify it as a supported AI agent.
+
+Install NativeRelay separately with `pip install nativerelay==0.2.0`; AgentTrace never installs Python packages. On Windows, AgentTrace can locate the user-level Python Scripts executable, but NativeRelay 0.2.0's OS collector is Linux-only, so Windows cannot produce native OS observations. On Linux, process and scoped file observations remain best effort and depend on kernel capabilities and privileges. `--native-relay` is opt-in during this integration milestone; ordinary `agenttrace run` retains its snapshot behavior.
 
 Record and stream process-observation events until Ctrl+C, then inspect the JSONL history:
 
