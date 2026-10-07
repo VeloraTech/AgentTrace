@@ -351,20 +351,25 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut got_record = false;
         let mut got_stderr = false;
-        let mut eof = false;
-        while std::time::Instant::now() < deadline && !eof {
+        let mut stdout_eof = false;
+        let mut stderr_eof = false;
+        while std::time::Instant::now() < deadline && !(stdout_eof && stderr_eof) {
             if let Some(message) = child.recv_timeout(std::time::Duration::from_millis(100)) {
                 match message {
                     Message::Record(v) if v["id"] == "child-event" => got_record = true,
                     Message::Stderr(line) if line.contains("fixture diagnostic") => {
                         got_stderr = true
                     }
-                    Message::StdoutEof => eof = true,
+                    Message::StdoutEof => stdout_eof = true,
+                    Message::StderrEof => stderr_eof = true,
                     _ => {}
                 }
             }
         }
-        assert!(eof);
+        assert!(
+            stdout_eof && stderr_eof,
+            "both child streams should reach EOF"
+        );
         assert!(got_record);
         assert!(got_stderr);
         assert!(child.wait().unwrap().success());
