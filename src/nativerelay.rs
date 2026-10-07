@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+use std::time::{Duration, Instant};
+
+const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 
 #[derive(Debug)]
 pub enum Message {
@@ -80,13 +83,47 @@ impl Process {
     pub fn shutdown(&mut self) -> io::Result<ExitStatus> {
         if self.child.try_wait()?.is_none() {
             #[cfg(unix)]
-            unsafe {
-                libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM);
+            {
+                let result = unsafe { libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM) };
+                if result == -1 {
+                    let error = io::Error::last_os_error();
+                    // The child can exit between try_wait and kill. Collect its status
+                    // below for ESRCH; return other signal failures instead of waiting forever.
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        return Err(error);
+                    }
+                }
             }
             #[cfg(windows)]
             self.child.kill()?;
+
+            let deadline = Instant::now() + SHUTDOWN_GRACE_PERIOD;
+            while Instant::now() < deadline {
+                if let Some(status) = self.child.try_wait()? {
+                    return Ok(status);
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+
+            // NativeRelay normally exits after SIGTERM. If it is stuck, force
+            // termination so AgentTrace cannot hang forever or leave it behind.
+            if self.child.try_wait()?.is_none() {
+                self.child.kill()?;
+            }
         }
         self.child.wait()
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        // Cover early returns after spawn (for example recorder or signal-handler
+        // setup failures). Normal shutdown has already reaped the child, so this
+        // path is only a last-resort cleanup.
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 }
 
@@ -202,21 +239,23 @@ fn find_executable() -> Option<PathBuf> {
     }
     #[cfg(windows)]
     {
-        for root in [
+        let roots = [
             env::var_os("APPDATA").map(|v| PathBuf::from(v).join("Python")),
             env::var_os("LOCALAPPDATA").map(|v| PathBuf::from(v).join("Programs").join("Python")),
-        ]
-        .into_iter()
-        .flatten()
-        {
+        ];
+        let mut candidates = Vec::new();
+        for root in roots.into_iter().flatten() {
             if let Ok(entries) = fs::read_dir(root) {
-                for e in entries.flatten() {
-                    let p = e.path().join("Scripts").join(name);
-                    if p.is_file() {
-                        return Some(p);
-                    }
-                }
+                candidates.extend(
+                    entries
+                        .flatten()
+                        .map(|entry| entry.path().join("Scripts").join(name)),
+                );
             }
+        }
+        candidates.sort();
+        if let Some(candidate) = candidates.into_iter().find(|path| path.is_file()) {
+            return Some(candidate);
         }
     }
     #[cfg(unix)]
@@ -312,20 +351,25 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut got_record = false;
         let mut got_stderr = false;
-        let mut eof = false;
-        while std::time::Instant::now() < deadline && !eof {
+        let mut stdout_eof = false;
+        let mut stderr_eof = false;
+        while std::time::Instant::now() < deadline && !(stdout_eof && stderr_eof) {
             if let Some(message) = child.recv_timeout(std::time::Duration::from_millis(100)) {
                 match message {
                     Message::Record(v) if v["id"] == "child-event" => got_record = true,
                     Message::Stderr(line) if line.contains("fixture diagnostic") => {
                         got_stderr = true
                     }
-                    Message::StdoutEof => eof = true,
+                    Message::StdoutEof => stdout_eof = true,
+                    Message::StderrEof => stderr_eof = true,
                     _ => {}
                 }
             }
         }
-        assert!(eof);
+        assert!(
+            stdout_eof && stderr_eof,
+            "both child streams should reach EOF"
+        );
         assert!(got_record);
         assert!(got_stderr);
         assert!(child.wait().unwrap().success());
@@ -333,6 +377,12 @@ mod tests {
     #[test]
     fn native_child_fixture() {
         if std::env::var_os("AGENTTRACE_NATIVE_FIXTURE").is_some() {
+            #[cfg(unix)]
+            if std::env::var_os("AGENTTRACE_NATIVE_IGNORE_TERM").is_some() {
+                unsafe {
+                    libc::signal(libc::SIGTERM, libc::SIG_IGN);
+                }
+            }
             println!(
                 "{}",
                 r#"{"schema_version":1,"id":"child-event","timestamp":"2026-10-07T12:00:00Z","type":"file.opened","platform":"linux","collector":"fixture","process":{"pid":1}}"#
@@ -366,6 +416,72 @@ mod tests {
         let _status = child.shutdown().unwrap();
         assert!(child.try_wait().unwrap().is_some());
     }
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_forces_reap_if_child_ignores_sigterm() {
+        let exe = std::env::current_exe().unwrap();
+        let mut child = Process::spawn_command_env(
+            exe.as_os_str(),
+            &[
+                "--exact",
+                "nativerelay::tests::native_child_fixture",
+                "--nocapture",
+            ],
+            &[
+                ("AGENTTRACE_NATIVE_FIXTURE", "1"),
+                ("AGENTTRACE_NATIVE_HOLD", "1"),
+                ("AGENTTRACE_NATIVE_IGNORE_TERM", "1"),
+            ],
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut fixture_ready = false;
+        while Instant::now() < deadline && !fixture_ready {
+            fixture_ready = matches!(
+                child.recv_timeout(Duration::from_millis(100)),
+                Some(Message::Record(record)) if record["id"] == "child-event"
+            );
+        }
+        assert!(fixture_ready, "fixture did not become ready");
+        let started = Instant::now();
+        let status = child.shutdown().unwrap();
+        assert!(!status.success());
+        assert!(started.elapsed() < SHUTDOWN_GRACE_PERIOD + Duration::from_secs(2));
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_adapter_terminates_child() {
+        let exe = std::env::current_exe().unwrap();
+        let mut child = Process::spawn_command_env(
+            exe.as_os_str(),
+            &[
+                "--exact",
+                "nativerelay::tests::native_child_fixture",
+                "--nocapture",
+            ],
+            &[
+                ("AGENTTRACE_NATIVE_FIXTURE", "1"),
+                ("AGENTTRACE_NATIVE_HOLD", "1"),
+            ],
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut fixture_ready = false;
+        while Instant::now() < deadline && !fixture_ready {
+            fixture_ready = matches!(
+                child.recv_timeout(Duration::from_millis(100)),
+                Some(Message::Record(record)) if record["id"] == "child-event"
+            );
+        }
+        assert!(fixture_ready, "fixture did not become ready");
+        let pid = child.id() as libc::pid_t;
+        drop(child);
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+
     #[test]
     fn child_nonzero_exit_is_observable() {
         let exe = std::env::current_exe().unwrap();
