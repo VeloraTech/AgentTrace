@@ -1,0 +1,33 @@
+﻿name: NativeRelay Linux integration
+
+on:
+  pull_request:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nativerelay-linux:
+    name: NativeRelay 0.2.0 Linux end-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install NativeRelay 0.2.0
+        run: python -m pip install nativerelay==0.2.0
+      - name: Run existing test suite
+        run: npm test
+      - name: Build AgentTrace
+        run: cargo build --locked
+      - name: Verify real Linux NativeRelay observations, recording, and shutdown
+        run: bash scripts/test-nativerelay-linux.sh
