@@ -50,9 +50,25 @@ cargo run -- run --native-relay
 cargo run -- watch --native-relay
 ```
 
-AgentTrace directly launches `nativerelay run --format json`, reads stdout incrementally as JSONL, and captures stderr separately for diagnostics. NativeRelay events and control records are wrapped in AgentTrace history events without dropping their original fields, IDs, timestamps, sequences, process/resource data, evidence, metadata, or loss details. Reported loss, sequence gaps, malformed records, degraded/unavailable status, and unexpected child exit mark the recording incomplete. Ctrl+C asks NativeRelay to stop, drains buffered stdout, waits for the child, then records the AgentTrace session stop. NativeRelay itself is not removed from observed events; AgentTrace's existing detectors do not classify it as a supported AI agent.
+Extended NativeRelay options (for `watch` and `run --watch`):
 
-Install NativeRelay separately with `pip install nativerelay==0.2.0`; AgentTrace never installs Python packages. On Windows, AgentTrace can locate the user-level Python Scripts executable, but NativeRelay 0.2.0's OS collector is Linux-only, so Windows cannot produce native OS observations. On Linux, process and scoped file observations remain best effort and depend on kernel capabilities and privileges. `--native-relay` is opt-in during this integration milestone; ordinary `agenttrace run` retains its snapshot behavior.
+```powershell
+# Scope NativeRelay file events to a specific directory (default: current directory)
+cargo run -- watch --native-relay --native-relay-scope /path/to/workspace
+
+# Include argv in NativeRelay process events (may expose secrets)
+cargo run -- watch --native-relay --native-relay-include-command
+
+# Include only matching file paths (fnmatch patterns, repeatable)
+cargo run -- watch --native-relay --native-relay-include-paths "*.rs" --native-relay-include-paths "*.toml"
+
+# Exclude matching file paths (fnmatch patterns, repeatable)
+cargo run -- watch --native-relay --native-relay-exclude-paths "target/*" --native-relay-exclude-paths ".git/*"
+```
+
+AgentTrace directly launches `nativerelay run --format json --scope <dir> [--include-command] [--include-paths ...] [--exclude-paths ...]`, reads stdout incrementally as JSONL, and captures stderr separately for diagnostics. NativeRelay events and control records are written to AgentTrace history with their original fields preserved (`id`, `timestamp`, `type`, `sequence`, `process`, `resource`, `metadata`, `evidence`, `schema_version`). Control records (`nativerelay.status` with capabilities/health, `nativerelay.loss` with loss generation and ledger) are recorded as first-class events. Reported loss, sequence gaps, malformed records, degraded/unavailable status, and unexpected child exit mark the recording incomplete (`observations_lost_or_incomplete: true` in `session_stopped`). Ctrl+C asks NativeRelay to stop, drains buffered stdout, waits for the child, then records the AgentTrace session stop with a `native_relay` summary object containing final capabilities, health, losses, and collection state. NativeRelay itself is not removed from observed events; AgentTrace's existing detectors do not classify it as a supported AI agent.
+
+Install NativeRelay separately with `pip install nativerelay==0.2.0`; AgentTrace never installs Python packages. On Windows, AgentTrace can locate the user-level Python Scripts executable, but NativeRelay 0.2.0's OS collector is Linux-only, so Windows cannot produce native OS observations. On Linux, process and scoped file observations remain best effort and depend on kernel capabilities and privileges (CN_PROC requires root or CAP_NET_ADMIN; fanotify requires CAP_SYS_ADMIN). `--native-relay` is opt-in during this integration milestone; ordinary `agenttrace run` retains its snapshot behavior.
 
 Record and stream process-observation events until Ctrl+C, then inspect the JSONL history:
 
