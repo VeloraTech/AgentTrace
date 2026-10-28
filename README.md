@@ -37,6 +37,34 @@ For process discovery, command arguments are inspected in memory for detection b
 - On Windows, the Rust MSVC toolchain and its Visual Studio C++ build tools
 - Optional live native observations: NativeRelay 0.2.0 (`pip install nativerelay==0.2.0`); its native collector currently supports Linux only
 
+## Platform Support
+
+| Platform | Process Discovery | Process Tracing | File Watching | NativeRelay Integration | Notes |
+|----------|-------------------|-----------------|---------------|------------------------|-------|
+| **Linux** | ✅ Full | ✅ Full | ✅ Polling | ✅ **Full** (CN_PROC + fanotify) | Requires root/CAP_NET_ADMIN for CN_PROC, CAP_SYS_ADMIN for fanotify. Best-effort coverage. |
+| **macOS** | ✅ Full | ✅ Full | ✅ Polling | ❌ Not available | NativeRelay macOS collector not yet implemented. |
+| **Windows** | ✅ Full | ✅ Full | ✅ Polling | ❌ Not available | NativeRelay Windows collector not yet implemented. WSL2: limited (kernel features may be missing). |
+
+### NativeRelay Linux Capabilities
+
+| Event Type | Linux Status | Requirements | Notes |
+|------------|--------------|--------------|-------|
+| `process.started`, `process.exited` | Best effort | root or `CAP_NET_ADMIN` (CN_PROC) | Short-lived processes may be missed. Netlink overrun reported as loss. |
+| `file.opened` | Best effort | `CAP_SYS_ADMIN` (fanotify) | Scoped to `--scope` directory. Path filtering via `--include-paths`/`--exclude-paths`. |
+| `file.created`, `file.deleted`, `file.renamed` | Best effort | `CAP_SYS_ADMIN` (fanotify) | Fanotify FAN_CREATE/FAN_DELETE/FAN_MOVE. PID attribution via FAN_REPORT_PID. |
+| `file.modified` | Best effort | `CAP_SYS_ADMIN` (fanotify) | Modification notification only; no byte-level detail. |
+
+### Loss Reporting
+
+NativeRelay reports detected losses but does not recover them:
+- **Stream queue full**: Exact count (`dropped` in health)
+- **fanotify overflow**: Unknown count, reported as loss
+- **CN_PROC netlink overrun**: Reported as loss (exact kernel queue loss not detectable)
+- **Path resolution failures**: Known operation count
+- **Malformed/truncated kernel records**: Reported as loss
+
+AgentTrace surfaces all losses via `nativerelay.loss` records and marks the trace `observations_lost_or_incomplete: true` in `session_stopped`.
+
 ## Run locally
 
 ```powershell
