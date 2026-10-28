@@ -3568,8 +3568,8 @@ mod tests {
         .unwrap();
         let event: Value =
             serde_json::from_slice(history.split(|byte| *byte == b'\n').next().unwrap()).unwrap();
-        assert_eq!(event["event_type"], "native_relay_loss");
-        assert_eq!(event["data"]["loss_generation"], 3);
+        assert_eq!(event["event_type"], "native_relay.loss");
+        assert_eq!(event["data"]["native_record"]["loss_generation"], 3);
         assert!(incomplete);
         // Verify loss was tracked
         assert_eq!(native_relay_losses.len(), 1);
@@ -3609,7 +3609,7 @@ mod tests {
         .unwrap();
         let event: Value =
             serde_json::from_slice(history.split(|byte| *byte == b'\n').next().unwrap()).unwrap();
-        assert_eq!(event["event_type"], "native_relay_status");
+        assert_eq!(event["event_type"], "native_relay.status");
         // Verify capabilities and health were stored
         assert_eq!(native_relay_capabilities.len(), 2);
         assert!(native_relay_health.is_some());
