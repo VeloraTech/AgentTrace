@@ -1435,7 +1435,7 @@ fn consume_native_message(
                 Some("nativerelay.loss") => {
                     *incomplete = true;
                     native_relay_losses.push(record.clone());
-                    "native_relay_loss"
+                    "native_relay.loss"
                 }
                 Some("nativerelay.status") => {
                     if let Some(capabilities) = record.get("capabilities") {
@@ -1448,11 +1448,11 @@ fn consume_native_message(
                     if !matches!(record["state"].as_str(), Some("running" | "stopped")) {
                         *incomplete = true;
                     }
-                    "native_relay_status"
+                    "native_relay.status"
                 }
                 Some(_) => {
                     *incomplete = true;
-                    "native_relay_unsupported_record"
+                    "native_relay.unsupported_record"
                 }
                 None if native_type.is_some() => {
                     let known = matches!(
@@ -1480,7 +1480,7 @@ fn consume_native_message(
                                         stdout,
                                         session_id,
                                         sequence,
-                                        "native_relay_sequence_gap",
+                                        "native_relay.sequence_gap",
                                         json!({
                                             "source_collector": source,
                                             "previous_sequence": previous,
@@ -1497,23 +1497,18 @@ fn consume_native_message(
                         }
                     }
                     if known {
-                        "native_relay_observation"
+                        "native_relay.observation"
                     } else {
-                        "native_relay_unsupported_record"
+                        "native_relay.unsupported_record"
                     }
                 }
                 None => {
                     *incomplete = true;
-                    "native_relay_unsupported_record"
+                    "native_relay.unsupported_record"
                 }
             };
-            // For status and loss records, write the full record directly (not wrapped in native_record)
-            // For observations, wrap in native_record for backward compatibility
-            let payload = if record_type == Some("nativerelay.status") || record_type == Some("nativerelay.loss") {
-                record
-            } else {
-                json!({ "native_record": record })
-            };
+            // For all records, wrap in native_record for backward compatibility with existing tests
+            let payload = json!({ "native_record": record });
             write_event(
                 history,
                 stdout,
@@ -3525,9 +3520,9 @@ mod tests {
                 .map(|event| event["event_type"].as_str().unwrap())
                 .collect::<Vec<_>>(),
             vec![
-                "native_relay_observation",
-                "native_relay_sequence_gap",
-                "native_relay_observation"
+                "native_relay.observation",
+                "native_relay.sequence_gap",
+                "native_relay.observation"
             ]
         );
         assert_eq!(events[0]["data"]["native_record"]["id"], "evt-12");
