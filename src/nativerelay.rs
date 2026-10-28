@@ -30,9 +30,31 @@ pub struct Process {
 }
 
 impl Process {
-    pub fn spawn() -> Result<Self, String> {
+    pub fn spawn(scope: &Path) -> Result<Self, String> {
         let exe = find_executable().ok_or_else(missing_error)?;
-        Self::spawn_command(exe.as_os_str(), &["run", "--format", "json"])
+        Self::spawn_command(exe.as_os_str(), &["run", "--format", "json", "--scope", scope.to_str().ok_or("scope path not valid UTF-8")?])
+    }
+
+    pub fn spawn_with_options(
+        scope: &Path,
+        include_command: bool,
+        include_paths: &[String],
+        exclude_paths: &[String],
+    ) -> Result<Self, String> {
+        let exe = find_executable().ok_or_else(missing_error)?;
+        let mut args = vec!["run", "--format", "json", "--scope", scope.to_str().ok_or("scope path not valid UTF-8")?];
+        if include_command {
+            args.push("--include-command");
+        }
+        for pattern in include_paths {
+            args.push("--include-paths");
+            args.push(pattern);
+        }
+        for pattern in exclude_paths {
+            args.push("--exclude-paths");
+            args.push(pattern);
+        }
+        Self::spawn_command(exe.as_os_str(), &args)
     }
     fn spawn_command(program: &OsStr, args: &[&str]) -> Result<Self, String> {
         Self::spawn_command_env(program, args, &[])
