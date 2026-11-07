@@ -878,7 +878,8 @@ mod tests {
     }
     #[test]
     fn missing_dependency_error_is_actionable() {
-        assert!(missing_error().contains("pip install nativerelay==0.3.2"));
+        assert!(missing_error().contains("pip install nativerelay=="));
+        assert!(missing_error().contains(MIN_NATIVERELAY_VERSION));
     }
 
     #[test]
@@ -975,7 +976,7 @@ mod tests {
         let err = version_error(&v_new, CompatibilityStatus::TooNew);
         assert!(err.contains("newer than the tested"));
         assert!(err.contains("0.4.0"));
-        assert!(err.contains("pip install nativerelay==0.3.2"));
+        assert!(err.contains(MIN_NATIVERELAY_VERSION));
 
         let v_compat = NativeRelayVersion::parse("0.3.2").unwrap();
         let err = version_error(&v_compat, CompatibilityStatus::Compatible);
@@ -986,6 +987,6 @@ mod tests {
     fn missing_error_contains_version_range() {
         let err = missing_error();
         assert!(err.contains("0.3.0 ≤ version < 0.4.0"));
-        assert!(err.contains("pip install nativerelay==0.3.2"));
+        assert!(err.contains(MIN_NATIVERELAY_VERSION));
     }
 }
