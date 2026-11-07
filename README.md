@@ -35,7 +35,37 @@ For process discovery, command arguments are inspected in memory for detection b
 
 - Rust stable and Cargo
 - On Windows, the Rust MSVC toolchain and its Visual Studio C++ build tools
-- Optional live native observations: NativeRelay 0.3.2 (`pip install nativerelay==0.3.2`); its native collector currently supports Linux only
+- **Optional live native observations**: NativeRelay (`pip install nativerelay==0.3.2`); its native collector currently supports Linux only. See [NativeRelay Integration](docs/native-relay.md) for detailed documentation.
+
+---
+
+## NativeRelay Integration
+
+NativeRelay is an **independent external project** (not an AgentTrace component) that provides Linux kernel-level telemetry via CN_PROC and fanotify. AgentTrace optionally integrates with it for enhanced observability.
+
+**Key Points:**
+- **Independently versioned and releasable** — AgentTrace 0.3.x works with NativeRelay `0.3.0 ≤ version < 0.4.0`
+- **Linux only** — Requires root or `CAP_NET_ADMIN` + `CAP_SYS_ADMIN` for full functionality
+- **Optional** — AgentTrace works fully without it using cross-platform polling
+- **Installation**: `pip install nativerelay==0.3.2`
+
+**Quick Start:**
+```bash
+pip install nativerelay==0.3.2
+agenttrace watch --native-relay
+```
+
+**Diagnostics:**
+```bash
+agenttrace status --native-relay   # Show collector status and capabilities
+agenttrace doctor                  # Diagnose installation and compatibility
+```
+
+**Documentation**: [docs/native-relay.md](docs/native-relay.md) — Installation, platform support, compatibility, architecture, troubleshooting, and future directions.
+
+**Links:**
+- NativeRelay GitHub: https://github.com/VeloraTech/NativeRelay
+- NativeRelay PyPI: https://pypi.org/project/nativerelay/
 
 ## Platform Support
 

@@ -92,6 +92,8 @@ fn main() {
         Some("watch") => watch_agents(&arguments[1..]).map(|()| 0),
         Some("history") => print_history(&arguments[1..]).map(|()| 0),
         Some("trace") => trace_command(&arguments[1..]),
+        Some("status") => status_command(&arguments[1..]).map(|()| 0),
+        Some("doctor") => doctor_command(&arguments[1..]).map(|()| 0),
         Some(command) => {
             eprintln!("Unknown command: {command}");
             print_help();
@@ -1064,6 +1066,21 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
         None
     };
     let native_relay_pid = native_relay.as_ref().map(nativerelay::Process::id);
+
+    // Display NativeRelay version info when enabled
+    if options.native_relay {
+        if let Some(adapter) = native_relay.as_ref() {
+            let exe_path = nativerelay::find_executable();
+            if let Some(path) = exe_path {
+                if let Some(version) = nativerelay::get_version(&path) {
+                    eprintln!("🔗 NativeRelay collector: {} (v{})", path.display(), version);
+                } else {
+                    eprintln!("🔗 NativeRelay collector: {}", path.display());
+                }
+            }
+        }
+    }
+
     let running = Arc::new(AtomicBool::new(true));
     let signal_state = Arc::clone(&running);
     ctrlc::set_handler(move || signal_state.store(false, Ordering::SeqCst))
@@ -2696,6 +2713,222 @@ fn instance_key(pid: &str, start_time: u64) -> String {
     format!("{pid}:{start_time}")
 }
 
+fn status_command(arguments: &[String]) -> Result<(), String> {
+    let mut show_native_relay = false;
+    let mut json_output = false;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--native-relay" => show_native_relay = true,
+            "--json" => json_output = true,
+            option => return Err(format!("unknown status option: {option}")),
+        }
+        index += 1;
+    }
+
+    if !show_native_relay {
+        return Err("status requires --native-relay flag".to_string());
+    }
+
+    let info = nativerelay::discover_nativerelay();
+
+    if json_output {
+        let output = serde_json::json!({
+            "native_relay": {
+                "executable_path": info.executable_path.map(|p| p.display().to_string()),
+                "version": info.version.as_ref().map(|v| v.version.clone()),
+                "compatibility": format!("{:?}", info.compatibility),
+                "platform_support": format!("{:?}", info.platform_support),
+                "can_start": info.can_start,
+                "start_error": info.start_error,
+                "version_range": format!("{} ≤ version < {}", nativerelay::MIN_NATIVERELAY_VERSION, nativerelay::MAX_NATIVERELAY_VERSION),
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        return Ok(());
+    }
+
+    // Human-readable output
+    println!("AgentTrace NativeRelay Status");
+    println!("=============================");
+    println!();
+
+    if let Some(path) = &info.executable_path {
+        println!("Executable: {}", path.display());
+    } else {
+        println!("Executable: not found");
+    }
+
+    if let Some(version) = &info.version {
+        println!("Version: {}", version.version);
+    } else {
+        println!("Version: unknown");
+    }
+
+    println!("Compatibility: {:?}", info.compatibility);
+    println!("Platform Support: {:?}", info.platform_support);
+    println!("Can Start: {}", if info.can_start { "yes" } else { "no" });
+
+    if let Some(error) = &info.start_error {
+        println!("Start Error: {}", error);
+    }
+
+    println!();
+    println!("Compatibility Range: {} ≤ version < {}", 
+        nativerelay::MIN_NATIVERELAY_VERSION, 
+        nativerelay::MAX_NATIVERELAY_VERSION);
+
+    // Exit with appropriate code
+    match info.compatibility {
+        nativerelay::CompatibilityStatus::Compatible => {}
+        nativerelay::CompatibilityStatus::TooOld => std::process::exit(1),
+        nativerelay::CompatibilityStatus::TooNew => std::process::exit(2),
+        nativerelay::CompatibilityStatus::Unavailable => std::process::exit(3),
+    }
+
+    Ok(())
+}
+
+fn doctor_command(arguments: &[String]) -> Result<(), String> {
+    let mut json_output = false;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--json" => json_output = true,
+            option => return Err(format!("unknown doctor option: {option}")),
+        }
+        index += 1;
+    }
+
+    let info = nativerelay::discover_nativerelay();
+    let mut issues = Vec::new();
+    let mut warnings = Vec::new();
+
+    // Check executable
+    if info.executable_path.is_none() {
+        issues.push("NativeRelay executable not found in PATH");
+    }
+
+    // Check version
+    if let Some(version) = &info.version {
+        match info.compatibility {
+            nativerelay::CompatibilityStatus::Compatible => {}
+            nativerelay::CompatibilityStatus::TooOld => {
+                issues.push(&format!("NativeRelay version {} is too old (minimum: {})", 
+                    version.version, nativerelay::MIN_NATIVERELAY_VERSION));
+            }
+            nativerelay::CompatibilityStatus::TooNew => {
+                warnings.push(&format!("NativeRelay version {} is newer than tested range (max: {})", 
+                    version.version, nativerelay::MAX_NATIVERELAY_VERSION));
+            }
+            nativerelay::CompatibilityStatus::Unavailable => {
+                issues.push("Could not determine NativeRelay version");
+            }
+        }
+    } else if info.executable_path.is_some() {
+        warnings.push("NativeRelay found but version could not be determined");
+    }
+
+    // Check platform support
+    match info.platform_support {
+        nativerelay::PlatformSupport::Full => {}
+        nativerelay::PlatformSupport::Degraded => {
+            warnings.push("Platform support is degraded (Linux: requires root or CAP_NET_ADMIN + CAP_SYS_ADMIN for full support)");
+        }
+        nativerelay::PlatformSupport::Unavailable => {
+            issues.push("NativeRelay collector is not available on this platform (Linux only)");
+        }
+    }
+
+    // Check if can start
+    if !info.can_start {
+        if let Some(error) = &info.start_error {
+            issues.push(&format!("NativeRelay cannot start: {}", error));
+        } else {
+            issues.push("NativeRelay cannot start (unknown reason)");
+        }
+    }
+
+    if json_output {
+        let output = serde_json::json!({
+            "native_relay": {
+                "executable_path": info.executable_path.map(|p| p.display().to_string()),
+                "version": info.version.as_ref().map(|v| v.version.clone()),
+                "compatibility": format!("{:?}", info.compatibility),
+                "platform_support": format!("{:?}", info.platform_support),
+                "can_start": info.can_start,
+                "start_error": info.start_error,
+                "version_range": format!("{} ≤ version < {}", nativerelay::MIN_NATIVERELAY_VERSION, nativerelay::MAX_NATIVERELAY_VERSION),
+            },
+            "diagnostics": {
+                "issues": issues,
+                "warnings": warnings,
+                "healthy": issues.is_empty(),
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        
+        if !issues.is_empty() {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // Human-readable output
+    println!("AgentTrace Doctor — NativeRelay Diagnostics");
+    println!("==========================================");
+    println!();
+
+    println!("Executable: {}", 
+        info.executable_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "NOT FOUND".to_string()));
+    
+    if let Some(version) = &info.version {
+        println!("Version: {}", version.version);
+    } else {
+        println!("Version: unknown");
+    }
+
+    println!("Platform Support: {:?}", info.platform_support);
+    println!("Can Start: {}", if info.can_start { "yes" } else { "no" });
+    println!();
+
+    if !issues.is_empty() {
+        println!("{}", paint("ISSUES:", "31", true));
+        for issue in &issues {
+            println!("  ✗ {}", issue);
+        }
+        println!();
+    }
+
+    if !warnings.is_empty() {
+        println!("{}", paint("WARNINGS:", "33", true));
+        for warning in &warnings {
+            println!("  ⚠ {}", warning);
+        }
+        println!();
+    }
+
+    if issues.is_empty() && warnings.is_empty() {
+        println!("{}", paint("All checks passed. NativeRelay is ready to use.", "32", true));
+    } else if issues.is_empty() {
+        println!("{}", paint("No critical issues. NativeRelay should work with warnings noted above.", "32", true));
+    }
+
+    println!();
+    println!("Compatibility Range: {} ≤ version < {}", 
+        nativerelay::MIN_NATIVERELAY_VERSION, 
+        nativerelay::MAX_NATIVERELAY_VERSION);
+    println!("Installation: pip install nativerelay=={}", nativerelay::MIN_NATIVERELAY_VERSION);
+    println!("Repository: https://github.com/VeloraTech/NativeRelay");
+    println!("PyPI: https://pypi.org/project/nativerelay/");
+
+    if !issues.is_empty() {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
 fn print_help() {
     println!(
         "TRACE USAGE: agenttrace trace [--check] [--output PATH] [--cwd PATH] [--include-command-args] [--capture-streams] -- PROGRAM [ARGS...]"
@@ -2704,7 +2937,7 @@ fn print_help() {
         "TRACE OPTIONS: --check (record command lifecycle); --output PATH; --cwd PATH; --include-command-args (sensitive); --capture-streams (up to 10 MiB per stream, sensitive); --watch-files (workspace metadata changes)\n"
     );
     println!(
-        "WATCH ALIAS: `agenttrace run --watch [WATCH OPTIONS]` is equivalent to `agenttrace watch [WATCH OPTIONS]`. Add `--native-relay` to start NativeRelay 0.2.0.\n"
+        "WATCH ALIAS: `agenttrace run --watch [WATCH OPTIONS]` is equivalent to `agenttrace watch [WATCH OPTIONS]`. Add `--native-relay` to start NativeRelay (requires nativerelay installed).\n"
     );
     println!(
         "WATCH OUTPUT: defaults to readable events; use `--json` for compact JSONL or `--pretty-json` for indented JSON records. Color is disabled in JSON modes and by `NO_COLOR`.\n"
@@ -2714,7 +2947,7 @@ fn print_help() {
     );
     println!("AgentTrace — discover running AI coding-agent processes\n");
     println!(
-        "USAGE:\n    agenttrace [run]\n    agenttrace watch [--output PATH] [--interval-ms MS] [--duration-ms MS] [--include-command-args] [--native-relay] [--native-relay-scope PATH] [--native-relay-include-command] [--native-relay-include-paths PATTERN] [--native-relay-exclude-paths PATTERN]\n    agenttrace history [--file PATH]\n\nCOMMANDS:\n    run       Take a one-time process snapshot (default)\n    watch     Stream process lifecycle events and append JSONL history\n    history   Print recorded JSONL history\n\nWATCH OPTIONS:\n    --output PATH                     History file (default: .agenttrace/history.jsonl)\n    --interval-ms MS                  Poll interval, at least 100 ms (default: 1000)\n    --duration-ms MS                  Stop after a bounded recording session\n    --include-command-args            Persist raw command arguments; may expose secrets\n    --native-relay                    Enable NativeRelay Linux kernel telemetry (requires nativerelay installed)\n    --native-relay-scope PATH         Directory scope for NativeRelay file events (default: current directory)\n    --native-relay-include-command    Include argv in NativeRelay process events (may expose secrets)\n    --native-relay-include-paths PATTERN  fnmatch pattern for NativeRelay file paths to include (repeatable)\n    --native-relay-exclude-paths PATTERN  fnmatch pattern for NativeRelay file paths to exclude (repeatable)\n\nOPTIONS:\n    -h, --help    Print this help message"
+        "USAGE:\n    agenttrace [run]\n    agenttrace watch [--output PATH] [--interval-ms MS] [--duration-ms MS] [--include-command-args] [--native-relay] [--native-relay-scope PATH] [--native-relay-include-command] [--native-relay-include-paths PATTERN] [--native-relay-exclude-paths PATTERN]\n    agenttrace history [--file PATH] [--json] [--pretty-json]\n    agenttrace status --native-relay [--json]\n    agenttrace doctor [--json]\n\nCOMMANDS:\n    run       Take a one-time process snapshot (default)\n    watch     Stream process lifecycle events and append JSONL history\n    history   Print recorded JSONL history\n    status    Show NativeRelay collector status and capabilities\n    doctor    Diagnose NativeRelay installation, compatibility, and platform support\n\nWATCH OPTIONS:\n    --output PATH                     History file (default: .agenttrace/history.jsonl)\n    --interval-ms MS                  Poll interval, at least 100 ms (default: 1000)\n    --duration-ms MS                  Stop after a bounded recording session\n    --include-command-args            Persist raw command arguments; may expose secrets\n    --native-relay                    Enable NativeRelay Linux kernel telemetry (requires nativerelay installed)\n    --native-relay-scope PATH         Directory scope for NativeRelay file events (default: current directory)\n    --native-relay-include-command    Include argv in NativeRelay process events (may expose secrets)\n    --native-relay-include-paths PATTERN  fnmatch pattern for NativeRelay file paths to include (repeatable)\n    --native-relay-exclude-paths PATTERN  fnmatch pattern for NativeRelay file paths to exclude (repeatable)\n\nSTATUS OPTIONS:\n    --native-relay                    Show NativeRelay collector status (required)\n    --json                            Output as JSON\n\nDOCTOR OPTIONS:\n    --json                            Output diagnostics as JSON\n\nOPTIONS:\n    -h, --help    Print this help message"
     );
 }
 
@@ -3615,5 +3848,23 @@ mod tests {
         assert!(native_relay_health.is_some());
         assert!(native_relay_status.is_some());
         assert_eq!(native_relay_status.unwrap()["state"], "running");
+    }
+
+    #[test]
+    fn status_command_requires_native_relay_flag() {
+        let err = status_command(&[]).unwrap_err();
+        assert!(err.contains("status requires --native-relay flag"));
+    }
+
+    #[test]
+    fn status_command_unknown_option() {
+        let err = status_command(&["--unknown".to_string()]).unwrap_err();
+        assert!(err.contains("unknown status option"));
+    }
+
+    #[test]
+    fn doctor_command_unknown_option() {
+        let err = doctor_command(&["--unknown".to_string()]).unwrap_err();
+        assert!(err.contains("unknown doctor option"));
     }
 }

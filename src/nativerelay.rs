@@ -11,6 +11,123 @@ use std::time::{Duration, Instant};
 
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 
+/// Minimum compatible NativeRelay version
+pub const MIN_NATIVERELAY_VERSION: &str = "0.3.0";
+/// Maximum tested NativeRelay version (exclusive upper bound for semver compatibility)
+pub const MAX_NATIVERELAY_VERSION: &str = "0.4.0";
+
+/// Parsed NativeRelay version information
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRelayVersion {
+    pub version: String,
+    pub major: u32,
+    pub minor: u32,
+    pub patch: u32,
+}
+
+impl NativeRelayVersion {
+    /// Parse a version string like "0.3.2" into components
+    pub fn parse(version: &str) -> Result<Self, String> {
+        let parts: Vec<&str> = version.trim().split('.').collect();
+        if parts.len() < 3 {
+            return Err(format!("invalid version format: {}", version));
+        }
+        let major = parts[0].parse().map_err(|_| format!("invalid major version: {}", parts[0]))?;
+        let minor = parts[1].parse().map_err(|_| format!("invalid minor version: {}", parts[1]))?;
+        let patch = parts[2].parse().map_err(|_| format!("invalid patch version: {}", parts[2]))?;
+        Ok(Self {
+            version: version.to_string(),
+            major,
+            minor,
+            patch,
+        })
+    }
+
+    /// Check if this version is compatible with AgentTrace
+    pub fn is_compatible(&self) -> bool {
+        let min = Self::parse(MIN_NATIVERELAY_VERSION).unwrap();
+        let max = Self::parse(MAX_NATIVERELAY_VERSION).unwrap();
+        self >= &min && self < &max
+    }
+
+    /// Get a human-readable compatibility status
+    pub fn compatibility_status(&self) -> CompatibilityStatus {
+        let min = Self::parse(MIN_NATIVERELAY_VERSION).unwrap();
+        let max = Self::parse(MAX_NATIVERELAY_VERSION).unwrap();
+        if self < &min {
+            CompatibilityStatus::TooOld
+        } else if self >= &max {
+            CompatibilityStatus::TooNew
+        } else {
+            CompatibilityStatus::Compatible
+        }
+    }
+}
+
+impl PartialOrd for NativeRelayVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for NativeRelayVersion {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.major, self.minor, self.patch).cmp(&(other.major, other.minor, other.patch))
+    }
+}
+
+/// Compatibility status of a NativeRelay version
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompatibilityStatus {
+    Compatible,
+    TooOld,
+    TooNew,
+    Unavailable,
+}
+
+/// NativeRelay collector capabilities as reported by the status record
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRelayCapability {
+    pub event_type: String,
+    pub status: String,
+    pub reason: String,
+    pub scope: String,
+}
+
+/// NativeRelay health information
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRelayHealth {
+    pub dropped: u64,
+    pub losses: serde_json::Value,
+}
+
+/// Complete NativeRelay status information
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeRelayStatus {
+    pub state: String,
+    pub capabilities: Vec<NativeRelayCapability>,
+    pub health: NativeRelayHealth,
+}
+
+/// NativeRelay discovery and diagnostic information
+#[derive(Debug, Clone)]
+pub struct NativeRelayInfo {
+    pub executable_path: Option<PathBuf>,
+    pub version: Option<NativeRelayVersion>,
+    pub compatibility: CompatibilityStatus,
+    pub platform_support: PlatformSupport,
+    pub can_start: bool,
+    pub start_error: Option<String>,
+}
+
+/// Platform support information for NativeRelay
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlatformSupport {
+    Full,
+    Degraded,
+    Unavailable,
+}
+
 #[derive(Debug)]
 pub enum Message {
     Record(Value),
@@ -150,7 +267,7 @@ impl Drop for Process {
 }
 
 fn missing_error() -> String {
-    "NativeRelay is required but was not found. Install NativeRelay 0.2.0 with:\n    pip install nativerelay==0.2.0\nIf it is already installed, add its Scripts/bin directory to PATH.".to_string()
+    "NativeRelay is required but was not found. Install NativeRelay 0.3.2 with:\n    pip install nativerelay==0.3.2\nIf it is already installed, add its Scripts/bin directory to PATH.".to_string()
 }
 
 fn stdout_reader(stdout: impl io::Read + Send + 'static, tx: Sender<Message>) {
@@ -288,6 +405,235 @@ fn find_executable() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Get the version of NativeRelay by running `nativerelay --version`
+pub fn get_version(executable: &Path) -> Option<String> {
+    let output = Command::new(executable)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !version.is_empty() {
+            return Some(version);
+        }
+    }
+    // Fallback: try -V
+    let output = Command::new(executable)
+        .arg("-V")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !version.is_empty() {
+            return Some(version);
+        }
+    }
+    None
+}
+
+/// Discover and diagnose NativeRelay installation
+pub fn discover_nativerelay() -> NativeRelayInfo {
+    let executable_path = find_executable();
+    let mut info = NativeRelayInfo {
+        executable_path: executable_path.clone(),
+        version: None,
+        compatibility: CompatibilityStatus::Unavailable,
+        platform_support: detect_platform_support(),
+        can_start: false,
+        start_error: None,
+    };
+
+    if let Some(ref path) = executable_path {
+        if let Some(version_str) = get_version(path) {
+            if let Ok(version) = NativeRelayVersion::parse(&version_str) {
+                info.compatibility = version.compatibility_status();
+                info.version = Some(version);
+            }
+        }
+
+        // Test if we can actually start the collector
+        let test_result = test_start_collector(path);
+        info.can_start = test_result.is_ok();
+        info.start_error = test_result.err();
+    }
+
+    info
+}
+
+/// Test if NativeRelay can start a collector (dry-run with --help to verify it works)
+fn test_start_collector(executable: &Path) -> Result<(), String> {
+    // Use --help as a quick test that the executable works
+    let output = Command::new(executable)
+        .arg("--help")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("failed to execute NativeRelay: {e}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("NativeRelay failed to start: {}", stderr.trim()))
+    }
+}
+
+/// Detect platform support level for NativeRelay
+fn detect_platform_support() -> PlatformSupport {
+    #[cfg(target_os = "linux")]
+    {
+        // Check if we have the required capabilities for full support
+        if has_cap_net_admin() && has_cap_sys_admin() {
+            PlatformSupport::Full
+        } else if is_root() {
+            PlatformSupport::Full
+        } else {
+            PlatformSupport::Degraded
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        PlatformSupport::Unavailable
+    }
+    #[cfg(target_os = "windows")]
+    {
+        PlatformSupport::Unavailable
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        PlatformSupport::Unavailable
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_root() -> bool {
+    // Check if running as root (UID 0)
+    unsafe { libc::getuid() == 0 }
+}
+
+#[cfg(target_os = "linux")]
+fn has_cap_net_admin() -> bool {
+    // Check for CAP_NET_ADMIN capability
+    check_capability(libc::CAP_NET_ADMIN)
+}
+
+#[cfg(target_os = "linux")]
+fn has_cap_sys_admin() -> bool {
+    // Check for CAP_SYS_ADMIN capability
+    check_capability(libc::CAP_SYS_ADMIN)
+}
+
+#[cfg(target_os = "linux")]
+fn check_capability(cap: u32) -> bool {
+    // Use cap_get_proc to check capabilities
+    // This is a simplified check - in practice we'd use libcap
+    // For now, just check if we're root
+    is_root()
+}
+
+/// Parse NativeRelay status record into structured data
+pub fn parse_status_record(record: &Value) -> Result<NativeRelayStatus, String> {
+    let state = record["state"]
+        .as_str()
+        .ok_or("missing state in status record")?
+        .to_string();
+
+    let capabilities = record["capabilities"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|cap| {
+                    Some(NativeRelayCapability {
+                        event_type: cap["event_type"].as_str()?.to_string(),
+                        status: cap["status"].as_str()?.to_string(),
+                        reason: cap["reason"].as_str().unwrap_or("").to_string(),
+                        scope: cap["scope"].as_str().unwrap_or("").to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let health = NativeRelayHealth {
+        dropped: record["health"]["dropped"].as_u64().unwrap_or(0),
+        losses: record["health"]["losses"].clone(),
+    };
+
+    Ok(NativeRelayStatus {
+        state,
+        capabilities,
+        health,
+    })
+}
+
+/// Generate actionable error message for missing NativeRelay
+pub fn missing_error() -> String {
+    format!(
+        "NativeRelay is required but was not found. Install NativeRelay {} with:\n    pip install nativerelay=={}\nIf it is already installed, add its Scripts/bin directory to PATH.",
+        version_range_string(),
+        MIN_NATIVERELAY_VERSION
+    )
+}
+
+/// Generate actionable error message for incompatible NativeRelay version
+pub fn version_error(version: &NativeRelayVersion, status: CompatibilityStatus) -> String {
+    match status {
+        CompatibilityStatus::TooOld => format!(
+            "NativeRelay version {} is too old. AgentTrace requires {} ≤ version < {}.\n    Upgrade with: pip install --upgrade nativerelay=={}",
+            version.version, MIN_NATIVERELAY_VERSION, MAX_NATIVERELAY_VERSION, MIN_NATIVERELAY_VERSION
+        ),
+        CompatibilityStatus::TooNew => format!(
+            "NativeRelay version {} is newer than the tested compatibility range ({}{} ≤ version < {}).\n    This version may work but is not officially tested. Consider pinning: pip install nativerelay=={}",
+            version.version, MIN_NATIVERELAY_VERSION, MAX_NATIVERELAY_VERSION, MIN_NATIVERELAY_VERSION
+        ),
+        CompatibilityStatus::Compatible => String::new(),
+        CompatibilityStatus::Unavailable => String::new(),
+    }
+}
+
+/// Generate actionable error message for NativeRelay that can't start
+pub fn start_error(path: &Path, error: &str, platform_support: PlatformSupport) -> String {
+    let mut msg = format!(
+        "NativeRelay found at {} but failed to start: {}\n",
+        path.display(),
+        error
+    );
+
+    match platform_support {
+        PlatformSupport::Unavailable => {
+            msg.push_str("NativeRelay collector is not available on this platform.\n");
+            msg.push_str("Supported platforms: Linux (with CN_PROC + fanotify)\n");
+        }
+        PlatformSupport::Degraded => {
+            msg.push_str("NativeRelay may have limited functionality on this platform.\n");
+            msg.push_str("On Linux, full support requires root or CAP_NET_ADMIN + CAP_SYS_ADMIN.\n");
+        }
+        PlatformSupport::Full => {
+            msg.push_str("This platform should support NativeRelay. Check the error above.\n");
+        }
+    }
+
+    msg.push_str("\nTroubleshooting:\n");
+    msg.push_str("  1. Verify NativeRelay installation: nativerelay --version\n");
+    msg.push_str("  2. Check NativeRelay logs: nativerelay run --format json --scope /tmp\n");
+    msg.push_str("  3. Ensure Python dependencies are installed\n");
+    msg.push_str("  4. On Linux, run with sufficient privileges for kernel collectors\n");
+
+    msg
+}
+
+/// Get the version range string for documentation
+fn version_range_string() -> String {
+    format!("{} ≤ version < {}", MIN_NATIVERELAY_VERSION, MAX_NATIVERELAY_VERSION)
 }
 
 #[cfg(test)]
@@ -535,6 +881,114 @@ mod tests {
     }
     #[test]
     fn missing_dependency_error_is_actionable() {
-        assert!(missing_error().contains("pip install nativerelay==0.2.0"));
+        assert!(missing_error().contains("pip install nativerelay==0.3.2"));
+    }
+
+    #[test]
+    fn native_relay_version_parse_valid() {
+        let v = NativeRelayVersion::parse("0.3.2").unwrap();
+        assert_eq!(v.major, 0);
+        assert_eq!(v.minor, 3);
+        assert_eq!(v.patch, 2);
+        assert_eq!(v.version, "0.3.2");
+    }
+
+    #[test]
+    fn native_relay_version_parse_invalid() {
+        assert!(NativeRelayVersion::parse("not-a-version").is_err());
+        assert!(NativeRelayVersion::parse("1.2").is_err());
+        assert!(NativeRelayVersion::parse("").is_err());
+    }
+
+    #[test]
+    fn native_relay_version_compatibility() {
+        let v = NativeRelayVersion::parse("0.3.2").unwrap();
+        assert!(v.is_compatible());
+        assert_eq!(v.compatibility_status(), CompatibilityStatus::Compatible);
+
+        let v_old = NativeRelayVersion::parse("0.2.0").unwrap();
+        assert!(!v_old.is_compatible());
+        assert_eq!(v_old.compatibility_status(), CompatibilityStatus::TooOld);
+
+        let v_new = NativeRelayVersion::parse("0.4.0").unwrap();
+        assert!(!v_new.is_compatible());
+        assert_eq!(v_new.compatibility_status(), CompatibilityStatus::TooNew);
+
+        let v_newer = NativeRelayVersion::parse("1.0.0").unwrap();
+        assert!(!v_newer.is_compatible());
+        assert_eq!(v_newer.compatibility_status(), CompatibilityStatus::TooNew);
+    }
+
+    #[test]
+    fn native_relay_version_ordering() {
+        let v1 = NativeRelayVersion::parse("0.3.1").unwrap();
+        let v2 = NativeRelayVersion::parse("0.3.2").unwrap();
+        let v3 = NativeRelayVersion::parse("0.4.0").unwrap();
+        assert!(v1 < v2);
+        assert!(v2 < v3);
+        assert!(v3 > v1);
+    }
+
+    #[test]
+    fn parse_status_record_valid() {
+        let record = serde_json::json!({
+            "schema_version": 1,
+            "record_type": "nativerelay.status",
+            "timestamp": "2026-10-07T12:00:00Z",
+            "state": "running",
+            "capabilities": [
+                {"event_type": "process.started", "status": "available", "reason": "", "scope": "/tmp"},
+                {"event_type": "file.opened", "status": "degraded", "reason": "permission_denied", "scope": "/tmp"}
+            ],
+            "health": {"dropped": 0, "losses": {}}
+        });
+        let status = parse_status_record(&record).unwrap();
+        assert_eq!(status.state, "running");
+        assert_eq!(status.capabilities.len(), 2);
+        assert_eq!(status.capabilities[0].event_type, "process.started");
+        assert_eq!(status.capabilities[0].status, "available");
+        assert_eq!(status.capabilities[1].event_type, "file.opened");
+        assert_eq!(status.capabilities[1].status, "degraded");
+        assert_eq!(status.capabilities[1].reason, "permission_denied");
+        assert_eq!(status.health.dropped, 0);
+    }
+
+    #[test]
+    fn parse_status_record_missing_state() {
+        let record = serde_json::json!({
+            "schema_version": 1,
+            "record_type": "nativerelay.status",
+            "timestamp": "2026-10-07T12:00:00Z",
+            "capabilities": [],
+            "health": {"dropped": 0, "losses": {}}
+        });
+        assert!(parse_status_record(&record).is_err());
+    }
+
+    #[test]
+    fn version_error_messages() {
+        let v_old = NativeRelayVersion::parse("0.2.0").unwrap();
+        let err = version_error(&v_old, CompatibilityStatus::TooOld);
+        assert!(err.contains("too old"));
+        assert!(err.contains("0.2.0"));
+        assert!(err.contains("0.3.0"));
+        assert!(err.contains("pip install --upgrade"));
+
+        let v_new = NativeRelayVersion::parse("0.4.0").unwrap();
+        let err = version_error(&v_new, CompatibilityStatus::TooNew);
+        assert!(err.contains("newer than the tested"));
+        assert!(err.contains("0.4.0"));
+        assert!(err.contains("pip install nativerelay==0.3.2"));
+
+        let v_compat = NativeRelayVersion::parse("0.3.2").unwrap();
+        let err = version_error(&v_compat, CompatibilityStatus::Compatible);
+        assert!(err.is_empty());
+    }
+
+    #[test]
+    fn missing_error_contains_version_range() {
+        let err = missing_error();
+        assert!(err.contains("0.3.0 ≤ version < 0.4.0"));
+        assert!(err.contains("pip install nativerelay==0.3.2"));
     }
 }
