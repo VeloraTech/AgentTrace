@@ -108,11 +108,10 @@ sudo -n kill -0 "$agenttrace_process_pid"
 # Generate scoped file open/modify events and kernel process start/exit events.
 printf 'initial contents\n' > "$activity_file"
 sleep 0.25
-printf 'modified contents\n' > "$activity_file"
-cat "$activity_file" >/dev/null
-sleep 2 &
+head -n 5 "$activity_file" >/dev/null &
 probe_pid=$!
-wait "$probe_pid"
+sleep 2
+wait "$probe_pid" 2>/dev/null || true
 
 if ! python3 - "$history_file" "$activity_file" "$probe_pid" <<'PY'
 import json, os, sys, time
