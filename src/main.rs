@@ -1069,7 +1069,7 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
 
     // Display NativeRelay version info when enabled
     if options.native_relay {
-        if let Some(adapter) = native_relay.as_ref() {
+        if let Some(_adapter) = native_relay.as_ref() {
             let exe_path = nativerelay::find_executable();
             if let Some(path) = exe_path {
                 if let Some(version) = nativerelay::get_version(&path) {
@@ -2801,12 +2801,12 @@ fn doctor_command(arguments: &[String]) -> Result<(), String> {
     }
 
     let info = nativerelay::discover_nativerelay();
-    let mut issues = Vec::new();
-    let mut warnings = Vec::new();
+    let mut issues = Vec::<String>::new();
+    let mut warnings = Vec::<String>::new();
 
     // Check executable
     if info.executable_path.is_none() {
-        issues.push("NativeRelay executable not found in PATH");
+        issues.push("NativeRelay executable not found in PATH".to_string());
     }
 
     // Check version
@@ -2814,38 +2814,38 @@ fn doctor_command(arguments: &[String]) -> Result<(), String> {
         match info.compatibility {
             nativerelay::CompatibilityStatus::Compatible => {}
             nativerelay::CompatibilityStatus::TooOld => {
-                issues.push(&format!("NativeRelay version {} is too old (minimum: {})", 
+                issues.push(format!("NativeRelay version {} is too old (minimum: {})", 
                     version.version, nativerelay::MIN_NATIVERELAY_VERSION));
             }
             nativerelay::CompatibilityStatus::TooNew => {
-                warnings.push(&format!("NativeRelay version {} is newer than tested range (max: {})", 
+                warnings.push(format!("NativeRelay version {} is newer than tested range (max: {})", 
                     version.version, nativerelay::MAX_NATIVERELAY_VERSION));
             }
             nativerelay::CompatibilityStatus::Unavailable => {
-                issues.push("Could not determine NativeRelay version");
+                issues.push("Could not determine NativeRelay version".to_string());
             }
         }
     } else if info.executable_path.is_some() {
-        warnings.push("NativeRelay found but version could not be determined");
+        warnings.push("NativeRelay found but version could not be determined".to_string());
     }
 
     // Check platform support
     match info.platform_support {
         nativerelay::PlatformSupport::Full => {}
         nativerelay::PlatformSupport::Degraded => {
-            warnings.push("Platform support is degraded (Linux: requires root or CAP_NET_ADMIN + CAP_SYS_ADMIN for full support)");
+            warnings.push("Platform support is degraded (Linux: requires root or CAP_NET_ADMIN + CAP_SYS_ADMIN for full support)".to_string());
         }
         nativerelay::PlatformSupport::Unavailable => {
-            issues.push("NativeRelay collector is not available on this platform (Linux only)");
+            issues.push("NativeRelay collector is not available on this platform (Linux only)".to_string());
         }
     }
 
     // Check if can start
     if !info.can_start {
         if let Some(error) = &info.start_error {
-            issues.push(&format!("NativeRelay cannot start: {}", error));
+            issues.push(format!("NativeRelay cannot start: {}", error));
         } else {
-            issues.push("NativeRelay cannot start (unknown reason)");
+            issues.push("NativeRelay cannot start (unknown reason)".to_string());
         }
     }
 

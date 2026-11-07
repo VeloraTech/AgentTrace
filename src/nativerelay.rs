@@ -1,7 +1,6 @@
 use serde_json::Value;
 use std::env;
 use std::ffi::OsStr;
-use std::fs;
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -266,9 +265,7 @@ impl Drop for Process {
     }
 }
 
-fn missing_error() -> String {
-    "NativeRelay is required but was not found. Install NativeRelay 0.3.2 with:\n    pip install nativerelay==0.3.2\nIf it is already installed, add its Scripts/bin directory to PATH.".to_string()
-}
+
 
 fn stdout_reader(stdout: impl io::Read + Send + 'static, tx: Sender<Message>) {
     thread::spawn(move || {
@@ -362,7 +359,7 @@ pub fn parse_record(line: &str) -> Result<Value, String> {
     Ok(value)
 }
 
-fn find_executable() -> Option<PathBuf> {
+pub fn find_executable() -> Option<PathBuf> {
     let name = if cfg!(windows) {
         "nativerelay.exe"
     } else {
@@ -522,18 +519,18 @@ fn is_root() -> bool {
 
 #[cfg(target_os = "linux")]
 fn has_cap_net_admin() -> bool {
-    // Check for CAP_NET_ADMIN capability
-    check_capability(libc::CAP_NET_ADMIN)
+    // Check for CAP_NET_ADMIN capability (value 12 on Linux)
+    check_capability(12)
 }
 
 #[cfg(target_os = "linux")]
 fn has_cap_sys_admin() -> bool {
-    // Check for CAP_SYS_ADMIN capability
-    check_capability(libc::CAP_SYS_ADMIN)
+    // Check for CAP_SYS_ADMIN capability (value 21 on Linux)
+    check_capability(21)
 }
 
 #[cfg(target_os = "linux")]
-fn check_capability(cap: u32) -> bool {
+fn check_capability(_cap: u32) -> bool {
     // Use cap_get_proc to check capabilities
     // This is a simplified check - in practice we'd use libcap
     // For now, just check if we're root
@@ -592,7 +589,7 @@ pub fn version_error(version: &NativeRelayVersion, status: CompatibilityStatus) 
             version.version, MIN_NATIVERELAY_VERSION, MAX_NATIVERELAY_VERSION, MIN_NATIVERELAY_VERSION
         ),
         CompatibilityStatus::TooNew => format!(
-            "NativeRelay version {} is newer than the tested compatibility range ({}{} ≤ version < {}).\n    This version may work but is not officially tested. Consider pinning: pip install nativerelay=={}",
+            "NativeRelay version {} is newer than the tested compatibility range ({} ≤ version < {}).\n    This version may work but is not officially tested. Consider pinning: pip install nativerelay=={}",
             version.version, MIN_NATIVERELAY_VERSION, MAX_NATIVERELAY_VERSION, MIN_NATIVERELAY_VERSION
         ),
         CompatibilityStatus::Compatible => String::new(),
@@ -822,7 +819,7 @@ mod tests {
     #[test]
     fn dropping_adapter_terminates_child() {
         let exe = std::env::current_exe().unwrap();
-        let mut child = Process::spawn_command_env(
+        let child = Process::spawn_command_env(
             exe.as_os_str(),
             &[
                 "--exact",
