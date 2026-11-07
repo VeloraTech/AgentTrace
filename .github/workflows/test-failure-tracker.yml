@@ -1,0 +1,185 @@
+name: Track Test Failures
+
+on:
+  workflow_run:
+    workflows: ["CI", "Release"]
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  track-failures:
+    name: Track Test Failures
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download test logs
+        uses: actions/github-script@v7
+        id: download-logs
+        with:
+          script: |
+            const runId = ${{ github.event.workflow_run.id }};
+            const logs = await github.rest.actions.downloadWorkflowRunLogs({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runId,
+            });
+            return logs.data;
+
+      - name: Extract failed tests
+        id: extract-tests
+        run: |
+          echo "${{ steps.download-logs.outputs.result }}" | base64 -d > logs.zip
+          unzip -o logs.zip -d logs/
+          FAILED_TESTS=()
+          for log_file in $(find logs -name "*.log" -o -name "*.txt" 2>/dev/null); do
+            while IFS= read -r line; do
+              if [[ "$line" =~ ^test\ (.+)\ \.\.\.\ FAILED$ ]]; then
+                FAILED_TESTS+=("${BASH_REMATCH[1]}")
+              fi
+              if [[ "$line" =~ ^\ \ \ \ test\ (.+)$ ]] && [[ "$prev_line" =~ ^failures:$ ]]; then
+                FAILED_TESTS+=("${BASH_REMATCH[1]}")
+              fi
+              prev_line="$line"
+            done < "$log_file"
+          done
+          printf '%s
+' "${FAILED_TESTS[@]}" | sort -u > failed_tests.txt
+          if [[ -s failed_tests.txt ]]; then
+            echo "failed=true" >> $GITHUB_OUTPUT
+            echo "tests<<EOF" >> $GITHUB_OUTPUT
+            cat failed_tests.txt >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "failed=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create/Update failure issues
+        if: ${{ steps.extract-tests.outputs.failed == 'true' }}
+        uses: actions/github-script@v7
+        env:
+          FAILED_TESTS: ${{ steps.extract-tests.outputs.tests }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+        script: |
+          const failedTests = process.env.FAILED_TESTS.trim().split('
+').filter(t => t);
+          const runUrl = process.env.RUN_URL;
+          const runId = process.env.RUN_ID;
+          const commitSha = process.env.COMMIT_SHA;
+          const workflowName = process.env.WORKFLOW_NAME;
+          for (const testName of failedTests) {
+            const issueTitle = `[Test Failure] ${testName}`;
+            const existingIssues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'test-failure',
+              per_page: 100
+            });
+            const existingIssue = existingIssues.data.find(issue => issue.title === issueTitle);
+            const body = `## Test Failure: \`${testName}\`
+
+**Workflow:** ${workflowName}
+**Run:** [#${runId}](${runUrl})
+**Commit:** \`${commitSha.substring(0, 7)}\`
+**Time:** ${new Date().toISOString()}
+
+---
+
+### Failure Details
+\`\`\`
+Test \`${testName}\` failed in workflow run [#${runId}](${runUrl}).
+
+View full logs: ${runUrl}
+\`\`\`
+
+---
+
+*This issue is automatically tracked. It will be closed when the test passes again.*`;
+            if (existingIssue) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existingIssue.number,
+                body: `### New Failure: ${new Date().toISOString()}
+
+**Workflow:** ${workflowName}
+**Run:** [#${runId}](${runUrl})
+**Commit:** \`${commitSha.substring(0, 7)}\`
+
+View logs: ${runUrl}
+
+---`
+              });
+              console.log(`Updated existing issue #${existingIssue.number} for ${testName}`);
+            } else {
+              const newIssue = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issueTitle,
+                body: body,
+                labels: ['test-failure', 'auto-tracked']
+              });
+              console.log(`Created new issue #${newIssue.number} for ${testName}`);
+            }
+          }
+
+  auto-close-resolved:
+    name: Auto-Close Resolved Issues
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Close resolved test failure issues
+        uses: actions/github-script@v7
+        env:
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+        script: |
+          const runUrl = process.env.RUN_URL;
+          const runId = process.env.RUN_ID;
+          const commitSha = process.env.COMMIT_SHA;
+          const workflowName = process.env.WORKFLOW_NAME;
+          const issues = await github.paginate(github.rest.issues.listForRepo, {
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            state: 'open',
+            labels: 'test-failure',
+            per_page: 100
+          });
+          for (const issue of issues) {
+            const match = issue.title.match(/^\[Test Failure\]\s+(.+)$/);
+            if (!match) continue;
+            const testName = match[1];
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              state: 'closed',
+              state_reason: 'completed'
+            });
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.number,
+              body: `[SUCCESS] **Test Resolved**
+
+This test (\`${testName}\`) is now passing again.
+
+**Resolved in workflow run:** [#${runId}](${runUrl})
+**Commit:** \`${commitSha.substring(0, 7)}\`
+**Workflow:** ${workflowName}
+**Time:** ${new Date().toISOString()}
+
+---`
+            });
+            console.log(`Closed issue #${issue.number} for ${testName}`);
+          }
