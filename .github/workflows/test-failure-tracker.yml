@@ -46,8 +46,7 @@ jobs:
               prev_line="$line"
             done < "$log_file"
           done
-          printf '%s
-' "${FAILED_TESTS[@]}" | sort -u > failed_tests.txt
+          printf '%s\n' "${FAILED_TESTS[@]}" | sort -u > failed_tests.txt
           if [[ -s failed_tests.txt ]]; then
             echo "failed=true" >> $GITHUB_OUTPUT
             echo "tests<<EOF" >> $GITHUB_OUTPUT

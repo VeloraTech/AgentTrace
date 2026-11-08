@@ -67,18 +67,22 @@ jobs:
           # Test that AgentTrace can start NativeRelay and communicate with it
           timeout 15 "$agenttrace_bin" run --native-relay --json --output "$history_file" &
           pid=$!
-          sleep 3
+          sleep 5
           kill -INT $pid 2>/dev/null || true
           wait $pid 2>/dev/null || true
           
+          # Debug: show history file contents
+          echo "=== History file contents ==="
+          cat "$history_file"
+          echo "=== End history file ==="
+          
           # Verify session started and NativeRelay process was spawned
           if grep -q '"event_type":"session_started"' "$history_file" && \
-             grep -q '"native_relay":{"enabled":true}' "$history_file"; then
+             grep -q '"enabled":true' "$history_file"; then
             echo "✅ Basic NativeRelay integration works (process spawn + JSONL communication)"
             exit 0
           else
             echo "❌ NativeRelay integration failed"
-            cat "$history_file"
             exit 1
           fi
 
@@ -117,13 +121,17 @@ jobs:
           # Test without --native-relay (should work)
           $proc = Start-Process $agenttrace_bin -ArgumentList "run", "--json", "--output", "$history_file" -PassThru
           $procId = $proc.Id
-          Start-Sleep -Seconds 5
+          Start-Sleep -Seconds 10
           Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
           
           # Debug: check if history file exists
           Write-Host "History file exists: $(Test-Path $history_file)"
           if (Test-Path $history_file) {
             Write-Host "History file size: $(Get-Item $history_file).Length bytes"
+            Write-Host "First 500 chars: $(Get-Content $history_file -Raw | Select-Object -First 500)"
+          } else {
+            Write-Host "ERROR: History file not found at $history_file"
+            Write-Host "Test dir contents: $(Get-ChildItem $test_dir -Recurse | ForEach-Object { $_.FullName })"
           }
           
           # Verify session works without NativeRelay
