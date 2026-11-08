@@ -98,9 +98,9 @@ jobs:
 
           # Test without --native-relay (should work)
           $proc = Start-Process $agenttrace_bin -ArgumentList "run", "--json", "--output", "$history_file" -PassThru
-          $pid = $proc.Id
+          $procId = $proc.Id
           Start-Sleep -Seconds 2
-          Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+          Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
           
           # Verify session works without NativeRelay
           if (Select-String -Path $history_file -Pattern '"event_type":"session_started"') {
@@ -121,9 +121,9 @@ jobs:
 
           & $agenttrace_bin run --native-relay --json --output "$history_file" 2>$test_dir\stderr.txt &
           $job = Get-Job -Newest 1
-          $pid = $job.ChildJobs[0].ProcessId
+          $procId = $job.ChildJobs[0].ProcessId
           Start-Sleep -Seconds 3
-          Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+          Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
           
           $stderr = Get-Content $test_dir\stderr.txt -Raw
           if ($stderr -match "not available on this platform" -or $stderr -match "NativeRelay collector is not available") {
