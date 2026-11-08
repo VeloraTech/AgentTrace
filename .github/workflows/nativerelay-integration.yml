@@ -32,9 +32,24 @@ jobs:
       - name: Check for root/capabilities
         id: check-root
         run: |
-          if [ "$(id -u)" -eq 0 ] || (command -v capsh >/dev/null && capsh --print | grep -q "cap_net_admin\|cap_sys_admin"); then
+          echo "Checking for root/capabilities..."
+          echo "uid=$(id -u)"
+          id -u
+          if [ "$(id -u)" -eq 0 ]; then
+            echo "Running as root"
             echo "has_privileges=true" >> $GITHUB_OUTPUT
+          elif command -v capsh >/dev/null; then
+            echo "capsh available, checking capabilities..."
+            capsh --print
+            if capsh --print | grep -q "cap_net_admin\|cap_sys_admin"; then
+              echo "Has required capabilities"
+              echo "has_privileges=true" >> $GITHUB_OUTPUT
+            else
+              echo "Missing required capabilities"
+              echo "has_privileges=false" >> $GITHUB_OUTPUT
+            fi
           else
+            echo "capsh not available, assuming no privileges"
             echo "has_privileges=false" >> $GITHUB_OUTPUT
           fi
       - name: Verify NativeRelay integration (full with privileges)
@@ -44,7 +59,9 @@ jobs:
         if: steps.check-root.outputs.has_privileges != 'true'
         run: |
           echo "Running without root/CAP_NET_ADMIN/CAP_SYS_ADMIN - testing basic integration only"
+          agenttrace_bin="target/debug/agenttrace"
           test_dir=$(mktemp -d)
+          history_file="$test_dir/history.jsonl"
           
           # Test that AgentTrace can start NativeRelay and communicate with it
           timeout 15 "$agenttrace_bin" run --native-relay --json --output "$history_file" &
@@ -93,7 +110,7 @@ jobs:
           # NativeRelay collectors not implemented on Windows yet
           # This test verifies AgentTrace handles missing NativeRelay gracefully
           $agenttrace_bin = "target\debug\agenttrace.exe"
-          $test_dir = (New-Item -ItemType Directory -Force -Path "$env:TEMP\nativerelay-test").FullName
+          $test_dir = (New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\nativerelay-test").FullName
           $history_file = "$test_dir\history.jsonl"
 
           # Test without --native-relay (should work)
@@ -116,7 +133,7 @@ jobs:
         run: |
           # Test that --native-relay gives actionable error on Windows
           $agenttrace_bin = "target\debug\agenttrace.exe"
-          $test_dir = (New-Item -ItemType Directory -Force -Path "$env:TEMP\nativerelay-test2").FullName
+          $test_dir = (New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\nativerelay-test2").FullName
           $history_file = "$test_dir\history.jsonl"
 
           & $agenttrace_bin run --native-relay --json --output "$history_file" 2>$test_dir\stderr.txt &
