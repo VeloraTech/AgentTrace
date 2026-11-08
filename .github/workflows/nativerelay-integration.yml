@@ -97,8 +97,8 @@ jobs:
           $history_file = "$test_dir\history.jsonl"
 
           # Test without --native-relay (should work)
-          & $agenttrace_bin run --json --output "$history_file" &
-          $pid = $!
+          $proc = Start-Process $agenttrace_bin -ArgumentList "run", "--json", "--output", "$history_file" -PassThru
+          $pid = $proc.Id
           Start-Sleep -Seconds 2
           Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
           
@@ -120,7 +120,8 @@ jobs:
           $history_file = "$test_dir\history.jsonl"
 
           & $agenttrace_bin run --native-relay --json --output "$history_file" 2>$test_dir\stderr.txt &
-          $pid = $!
+          $job = Get-Job -Newest 1
+          $pid = $job.ChildJobs[0].ProcessId
           Start-Sleep -Seconds 3
           Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
           
