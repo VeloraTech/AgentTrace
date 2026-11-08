@@ -2,7 +2,7 @@ name: Track Test Failures
 
 on:
   workflow_run:
-    workflows: ["NativeRelay Linux integration", "Release"]
+    workflows: ["NativeRelay Integration", "Release"]
     types: [completed]
 
 permissions:

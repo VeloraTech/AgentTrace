@@ -41,11 +41,12 @@ jobs:
           elif command -v capsh >/dev/null; then
             echo "capsh available, checking capabilities..."
             capsh --print
-            if capsh --print | grep -q "cap_net_admin\|cap_sys_admin"; then
-              echo "Has required capabilities"
+            # Check for effective capabilities
+            if capsh --print | grep -E "Current.*cap_net_admin" || capsh --print | grep -E "Current.*cap_sys_admin"; then
+              echo "Has required capabilities in effective set"
               echo "has_privileges=true" >> $GITHUB_OUTPUT
             else
-              echo "Missing required capabilities"
+              echo "Missing required capabilities in effective set"
               echo "has_privileges=false" >> $GITHUB_OUTPUT
             fi
           else
@@ -116,16 +117,22 @@ jobs:
           # Test without --native-relay (should work)
           $proc = Start-Process $agenttrace_bin -ArgumentList "run", "--json", "--output", "$history_file" -PassThru
           $procId = $proc.Id
-          Start-Sleep -Seconds 2
+          Start-Sleep -Seconds 5
           Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
           
+          # Debug: check if history file exists
+          Write-Host "History file exists: $(Test-Path $history_file)"
+          if (Test-Path $history_file) {
+            Write-Host "History file size: $(Get-Item $history_file).Length bytes"
+          }
+          
           # Verify session works without NativeRelay
-          if (Select-String -Path $history_file -Pattern '"event_type":"session_started"') {
+          if (Test-Path $history_file -and (Select-String -Path $history_file -Pattern '"event_type":"session_started"')) {
             Write-Host "✅ AgentTrace works on Windows without NativeRelay"
             exit 0
           } else {
             Write-Host "❌ AgentTrace failed on Windows"
-            Get-Content $history_file
+            if (Test-Path $history_file) { Get-Content $history_file }
             exit 1
           }
       - name: Verify NativeRelay missing handling
