@@ -44,9 +44,7 @@ jobs:
         if: steps.check-root.outputs.has_privileges != 'true'
         run: |
           echo "Running without root/CAP_NET_ADMIN/CAP_SYS_ADMIN - testing basic integration only"
-          agenttrace_bin="target/debug/agenttrace"
           test_dir=$(mktemp -d)
-          history_file="$test_dir/history.jsonl"
           
           # Test that AgentTrace can start NativeRelay and communicate with it
           timeout 15 "$agenttrace_bin" run --native-relay --json --output "$history_file" &
@@ -90,13 +88,14 @@ jobs:
       - name: Build AgentTrace
         run: cargo build --locked
       - name: Verify NativeRelay Windows availability
+        shell: pwsh
         run: |
           # NativeRelay collectors not implemented on Windows yet
           # This test verifies AgentTrace handles missing NativeRelay gracefully
-          agenttrace_bin="target\\debug\\agenttrace.exe"
-          test_dir=$(New-Item -ItemType Directory -Force -Path "$env:TEMP\nativerelay-test").FullName
-          history_file="$test_dir\history.jsonl"
-          
+          $agenttrace_bin = "target\debug\agenttrace.exe"
+          $test_dir = (New-Item -ItemType Directory -Force -Path "$env:TEMP\nativerelay-test").FullName
+          $history_file = "$test_dir\history.jsonl"
+
           # Test without --native-relay (should work)
           & $agenttrace_bin run --json --output "$history_file" &
           $pid = $!
@@ -113,12 +112,13 @@ jobs:
             exit 1
           }
       - name: Verify NativeRelay missing handling
+        shell: pwsh
         run: |
           # Test that --native-relay gives actionable error on Windows
-          agenttrace_bin="target\\debug\\agenttrace.exe"
-          test_dir=$(New-Item -ItemType Directory -Force -Path "$env:TEMP\nativerelay-test2").FullName
-          history_file="$test_dir\history.jsonl"
-          
+          $agenttrace_bin = "target\debug\agenttrace.exe"
+          $test_dir = (New-Item -ItemType Directory -Force -Path "$env:TEMP\nativerelay-test2").FullName
+          $history_file = "$test_dir\history.jsonl"
+
           & $agenttrace_bin run --native-relay --json --output "$history_file" 2>$test_dir\stderr.txt &
           $pid = $!
           Start-Sleep -Seconds 3
