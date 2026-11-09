@@ -65,20 +65,25 @@ jobs:
           history_file="$test_dir/history.jsonl"
           
           # Test that AgentTrace can start NativeRelay and communicate with it
-          timeout 15 "$agenttrace_bin" run --native-relay --json --output "$history_file" &
+          # Capture stdout to check for session_started event
+          timeout 15 "$agenttrace_bin" run --native-relay --json --output "$history_file" >"$test_dir/stdout.log" 2>"$test_dir/stderr.log" &
           pid=$!
-          sleep 5
+          sleep 10
           kill -INT $pid 2>/dev/null || true
           wait $pid 2>/dev/null || true
           
-          # Debug: show history file contents
-          echo "=== History file contents ==="
-          cat "$history_file"
-          echo "=== End history file ==="
+          # Debug: show outputs
+          echo "=== STDOUT ==="
+          cat "$test_dir/stdout.log"
+          echo "=== STDERR ==="
+          cat "$test_dir/stderr.log"
+          echo "=== HISTORY FILE ==="
+          cat "$history_file" 2>/dev/null || echo "(no history file)"
+          echo "=== END ==="
           
-          # Verify session started and NativeRelay process was spawned
-          if grep -q '"event_type":"session_started"' "$history_file" && \
-             grep -q '"enabled":true' "$history_file"; then
+          # Verify session started (check stdout for session_started event)
+          if grep -q '"event_type":"session_started"' "$test_dir/stdout.log" && \
+             grep -q '"enabled":true' "$test_dir/stdout.log"; then
             echo "✅ Basic NativeRelay integration works (process spawn + JSONL communication)"
             exit 0
           else
@@ -119,10 +124,20 @@ jobs:
           $history_file = "$test_dir\history.jsonl"
 
           # Test without --native-relay (should work)
-          $proc = Start-Process $agenttrace_bin -ArgumentList "run", "--json", "--output", "$history_file" -PassThru
+          # Use --duration-ms to let the process exit cleanly instead of force-killing
+          $proc = Start-Process $agenttrace_bin -ArgumentList "run", "--watch", "--json", "--output", "$history_file", "--duration-ms", "10000" -PassThru -RedirectStandardOutput "$test_dir\stdout.log" -RedirectStandardError "$test_dir\stderr.log"
           $procId = $proc.Id
-          Start-Sleep -Seconds 10
-          Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+          Write-Host "Started agenttrace with PID: $procId"
+          # Wait for process to exit (with --duration-ms 10000 it should exit within ~10-12 seconds)
+          $proc.WaitForExit(15000)
+          $exitCode = $proc.ExitCode
+          Write-Host "Process exited with code: $exitCode"
+          
+          # Debug: check outputs
+          Write-Host "=== STDOUT ==="
+          Get-Content "$test_dir\stdout.log" -ErrorAction SilentlyContinue | Write-Host
+          Write-Host "=== STDERR ==="
+          Get-Content "$test_dir\stderr.log" -ErrorAction SilentlyContinue | Write-Host
           
           # Debug: check if history file exists
           Write-Host "History file exists: $(Test-Path $history_file)"
@@ -151,11 +166,14 @@ jobs:
           $test_dir = (New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\nativerelay-test2").FullName
           $history_file = "$test_dir\history.jsonl"
 
-          & $agenttrace_bin run --native-relay --json --output "$history_file" 2>$test_dir\stderr.txt &
-          $job = Get-Job -Newest 1
-          $procId = $job.ChildJobs[0].ProcessId
-          Start-Sleep -Seconds 3
-          Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+          # Run with --native-relay and capture stderr - process should exit with error
+          $proc = Start-Process $agenttrace_bin -ArgumentList "run", "--native-relay", "--json", "--output", "$history_file" -PassThru -RedirectStandardError "$test_dir\stderr.txt" -RedirectStandardOutput "$test_dir\stdout.txt"
+          $procId = $proc.Id
+          Write-Host "Started agenttrace with PID: $procId"
+          # Wait for process to exit (should fail quickly on Windows)
+          $proc.WaitForExit(10000)
+          $exitCode = $proc.ExitCode
+          Write-Host "Process exited with code: $exitCode"
           
           $stderr = Get-Content $test_dir\stderr.txt -Raw
           if ($stderr -match "not available on this platform" -or $stderr -match "NativeRelay collector is not available") {

@@ -3081,12 +3081,21 @@ mod tests {
             .unwrap();
         let child_pid = child.id().to_string();
         let root_pid = std::process::id().to_string();
-        thread::sleep(Duration::from_millis(200));
-        let mut system = System::new_all();
-        system.refresh_all();
-        let child_record = snapshot_processes(&system, false)
-            .into_iter()
-            .find(|process| process.pid == child_pid);
+
+        // Retry with increasing backoff to handle slow CI systems
+        let mut child_record = None;
+        for attempt in 0..10 {
+            thread::sleep(Duration::from_millis(200 + attempt * 100));
+            let mut system = System::new_all();
+            system.refresh_all();
+            child_record = snapshot_processes(&system, false)
+                .into_iter()
+                .find(|process| process.pid == child_pid);
+            if child_record.is_some() {
+                break;
+            }
+        }
+
         let _ = child.kill();
         let _ = child.wait();
 

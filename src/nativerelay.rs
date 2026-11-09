@@ -121,6 +121,7 @@ pub struct NativeRelayInfo {
 }
 
 /// Platform support information for NativeRelay
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformSupport {
     Full,
@@ -141,12 +142,44 @@ pub enum Message {
     StderrEof,
     ReadError(String),
 }
+
+/// Trait for NativeRelay collector abstraction.
+/// This allows AgentTrace to work with both managed (spawned) and external (pre-running) collectors.
+#[allow(dead_code)]
+pub trait Collector: Send {
+    /// Try to receive the next message from the collector without blocking.
+    fn try_message(&self) -> Option<Message>;
+
+    /// Wait for a message with a timeout.
+    fn recv_timeout(&self, timeout: Duration) -> Option<Message>;
+
+    /// Check if the collector process has exited.
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
+
+    /// Wait for the collector to exit.
+    fn wait(&mut self) -> io::Result<ExitStatus>;
+
+    /// Gracefully shut down the collector.
+    fn shutdown(&mut self) -> io::Result<ExitStatus>;
+
+    /// Get the collector's process ID (if applicable).
+    fn id(&self) -> Option<u32>;
+
+    /// Check if the collector is healthy (running and responsive).
+    fn is_healthy(&mut self) -> bool {
+        // Default implementation: healthy if not exited
+        self.try_wait().ok().flatten().is_none()
+    }
+}
+
+/// A managed collector that AgentTrace spawns and manages.
 pub struct Process {
     child: Child,
     messages: Receiver<Message>,
 }
 
 impl Process {
+    #[allow(dead_code)]
     pub fn spawn(scope: &Path) -> Result<Self, String> {
         let exe = find_executable().ok_or_else(missing_error)?;
         Self::spawn_command(exe.as_os_str(), &["run", "--format", "json", "--scope", scope.to_str().ok_or("scope path not valid UTF-8")?])
@@ -251,6 +284,33 @@ impl Process {
             }
         }
         self.child.wait()
+    }
+}
+
+impl Collector for Process {
+    fn try_message(&self) -> Option<Message> {
+        self.messages.try_recv().ok()
+    }
+
+    fn recv_timeout(&self, timeout: Duration) -> Option<Message> {
+        self.messages.recv_timeout(timeout).ok()
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.child.try_wait()
+    }
+
+    fn wait(&mut self) -> io::Result<ExitStatus> {
+        self.child.wait()
+    }
+
+    fn shutdown(&mut self) -> io::Result<ExitStatus> {
+        // Use the existing shutdown method
+        Process::shutdown(self)
+    }
+
+    fn id(&self) -> Option<u32> {
+        Some(self.child.id())
     }
 }
 
@@ -599,6 +659,7 @@ pub fn version_error(version: &NativeRelayVersion, status: CompatibilityStatus) 
 }
 
 /// Generate actionable error message for NativeRelay that can't start
+#[allow(dead_code)]
 pub fn start_error(path: &Path, error: &str, platform_support: PlatformSupport) -> String {
     let mut msg = format!(
         "NativeRelay found at {} but failed to start: {}\n",
@@ -989,5 +1050,142 @@ mod tests {
         let err = missing_error();
         assert!(err.contains("0.3.0 ≤ version < 0.4.0"));
         assert!(err.contains(MIN_NATIVERELAY_VERSION));
+    }
+
+    #[test]
+    fn discover_nativerelay_returns_unavailable_on_non_linux() {
+        // On non-Linux platforms, discover_nativerelay should return Unavailable platform support
+        #[cfg(not(target_os = "linux"))]
+        {
+            let info = discover_nativerelay();
+            assert_eq!(info.compatibility, CompatibilityStatus::Unavailable);
+            assert_eq!(info.platform_support, PlatformSupport::Unavailable);
+            // Note: can_start depends on whether there's a nativerelay executable in PATH
+            // which can vary by environment, so we don't assert on it
+            assert!(info.executable_path.is_none() || info.version.is_none());
+        }
+    }
+
+    #[test]
+    fn discover_nativerelay_version_check_logic() {
+        // Test the version compatibility logic used in discover_nativerelay
+        // This tests the internal logic without requiring an actual NativeRelay installation
+
+        // Test compatible version
+        let v_compat = NativeRelayVersion::parse("0.3.2").unwrap();
+        assert!(v_compat.is_compatible());
+        assert_eq!(v_compat.compatibility_status(), CompatibilityStatus::Compatible);
+
+        // Test too old version
+        let v_old = NativeRelayVersion::parse("0.2.0").unwrap();
+        assert!(!v_old.is_compatible());
+        assert_eq!(v_old.compatibility_status(), CompatibilityStatus::TooOld);
+
+        // Test too new version
+        let v_new = NativeRelayVersion::parse("0.4.0").unwrap();
+        assert!(!v_new.is_compatible());
+        assert_eq!(v_new.compatibility_status(), CompatibilityStatus::TooNew);
+
+        // Test version error messages
+        let err_old = version_error(&v_old, CompatibilityStatus::TooOld);
+        assert!(err_old.contains("too old"));
+        assert!(err_old.contains("0.2.0"));
+        assert!(err_old.contains("0.3.0"));
+
+        let err_new = version_error(&v_new, CompatibilityStatus::TooNew);
+        assert!(err_new.contains("newer than the tested"));
+        assert!(err_new.contains("0.4.0"));
+    }
+
+    #[test]
+    fn native_relay_info_structure() {
+        // Test that NativeRelayInfo can be constructed with all fields
+        use std::path::PathBuf;
+
+        let info = NativeRelayInfo {
+            executable_path: Some(PathBuf::from("/usr/bin/nativerelay")),
+            version: Some(NativeRelayVersion::parse("0.3.2").unwrap()),
+            compatibility: CompatibilityStatus::Compatible,
+            platform_support: PlatformSupport::Full,
+            can_start: true,
+            start_error: None,
+        };
+
+        assert!(info.executable_path.is_some());
+        assert!(info.version.is_some());
+        assert_eq!(info.compatibility, CompatibilityStatus::Compatible);
+        assert_eq!(info.platform_support, PlatformSupport::Full);
+        assert!(info.can_start);
+        assert!(info.start_error.is_none());
+    }
+
+    #[test]
+    fn native_relay_info_unavailable() {
+        // Test NativeRelayInfo for unavailable case
+        let info = NativeRelayInfo {
+            executable_path: None,
+            version: None,
+            compatibility: CompatibilityStatus::Unavailable,
+            platform_support: PlatformSupport::Unavailable,
+            can_start: false,
+            start_error: Some("NativeRelay not found".to_string()),
+        };
+
+        assert!(info.executable_path.is_none());
+        assert!(info.version.is_none());
+        assert_eq!(info.compatibility, CompatibilityStatus::Unavailable);
+        assert_eq!(info.platform_support, PlatformSupport::Unavailable);
+        assert!(!info.can_start);
+        assert!(info.start_error.is_some());
+    }
+
+    #[test]
+    fn native_relay_info_degraded_platform() {
+        // Test NativeRelayInfo for degraded platform support
+        let info = NativeRelayInfo {
+            executable_path: Some(PathBuf::from("/usr/bin/nativerelay")),
+            version: Some(NativeRelayVersion::parse("0.3.2").unwrap()),
+            compatibility: CompatibilityStatus::Compatible,
+            platform_support: PlatformSupport::Degraded,
+            can_start: true,
+            start_error: None,
+        };
+
+        assert_eq!(info.platform_support, PlatformSupport::Degraded);
+        assert!(info.can_start);
+    }
+
+    #[test]
+    fn native_relay_info_cannot_start() {
+        // Test NativeRelayInfo when collector cannot start
+        let info = NativeRelayInfo {
+            executable_path: Some(PathBuf::from("/usr/bin/nativerelay")),
+            version: Some(NativeRelayVersion::parse("0.3.2").unwrap()),
+            compatibility: CompatibilityStatus::Compatible,
+            platform_support: PlatformSupport::Full,
+            can_start: false,
+            start_error: Some("permission denied".to_string()),
+        };
+
+        assert!(!info.can_start);
+        assert!(info.start_error.is_some());
+        assert_eq!(info.start_error.unwrap(), "permission denied");
+    }
+
+    #[test]
+    fn compatibility_status_display() {
+        // Test that CompatibilityStatus can be formatted for display
+        assert_eq!(format!("{:?}", CompatibilityStatus::Compatible), "Compatible");
+        assert_eq!(format!("{:?}", CompatibilityStatus::TooOld), "TooOld");
+        assert_eq!(format!("{:?}", CompatibilityStatus::TooNew), "TooNew");
+        assert_eq!(format!("{:?}", CompatibilityStatus::Unavailable), "Unavailable");
+    }
+
+    #[test]
+    fn platform_support_display() {
+        // Test that PlatformSupport can be formatted for display
+        assert_eq!(format!("{:?}", PlatformSupport::Full), "Full");
+        assert_eq!(format!("{:?}", PlatformSupport::Degraded), "Degraded");
+        assert_eq!(format!("{:?}", PlatformSupport::Unavailable), "Unavailable");
     }
 }
