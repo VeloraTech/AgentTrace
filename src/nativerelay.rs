@@ -585,7 +585,8 @@ fn detect_platform_support() -> PlatformSupport {
     }
     #[cfg(target_os = "windows")]
     {
-        PlatformSupport::Unavailable
+        // Windows process and scoped filesystem collectors are available in NativeRelay 0.4.x.
+        PlatformSupport::Degraded
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
@@ -657,9 +658,8 @@ pub fn parse_status_record(record: &Value) -> Result<NativeRelayStatus, String> 
 /// Generate actionable error message for missing NativeRelay
 pub fn missing_error() -> String {
     format!(
-        "NativeRelay is required but was not found. Install NativeRelay {} with:\n    pip install nativerelay=={}\nIf it is already installed, add its Scripts/bin directory to PATH.",
-        version_range_string(),
-        MIN_NATIVERELAY_VERSION
+        "NativeRelay is required but was not found ({}). On Windows, download the compatible wheel from https://github.com/VeloraTech/NativeRelay/releases and install it with: python -m pip install <wheel-path>. Ensure Python's Scripts directory is on PATH.",
+        version_range_string()
     )
 }
 
