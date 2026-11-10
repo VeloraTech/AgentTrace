@@ -1136,7 +1136,7 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
                 "stdin": false,
                 "stdout": false,
                 "stderr": false,
-                "file_events": if options.native_relay { "native_relay_best_effort_linux_scoped" } else { "disabled" },
+                "file_events": if options.native_relay { "native_relay_best_effort_platform_scoped" } else { "disabled" },
                 "native_relay": options.native_relay,
                 "native_relay_loss_reporting": options.native_relay
             }
