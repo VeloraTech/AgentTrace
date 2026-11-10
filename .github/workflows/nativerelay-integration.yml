@@ -58,7 +58,7 @@ jobs:
           $history = Join-Path $testDir "history.jsonl"
           $stdout = Join-Path $testDir "agenttrace.stdout"
           $stderr = Join-Path $testDir "agenttrace.stderr"
-          $activity = Join-Path $testDir "activity.txt"
+          $activity = Join-Path $env:GITHUB_WORKSPACE ".nativerelay-integration-activity-$PID.txt"
           $p = Start-Process -FilePath $agenttrace -ArgumentList @("run", "--native-relay", "--json", "--output", $history) -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
           try {
             $ready = $false
@@ -103,5 +103,6 @@ jobs:
           }
           finally {
             if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+            Remove-Item $activity -Force -ErrorAction SilentlyContinue
             Remove-Item $testDir -Recurse -Force -ErrorAction SilentlyContinue
           }
