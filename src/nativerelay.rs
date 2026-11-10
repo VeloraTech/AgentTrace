@@ -961,7 +961,7 @@ mod tests {
     }
     #[test]
     fn missing_dependency_error_is_actionable() {
-        assert!(missing_error().contains("pip install nativerelay=="));
+        assert!(missing_error().contains("pip install <wheel-path>"));
         assert!(missing_error().contains(MIN_NATIVERELAY_VERSION));
     }
 
