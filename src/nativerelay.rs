@@ -23,6 +23,7 @@ pub struct NativeRelayVersion {
     pub major: u32,
     pub minor: u32,
     pub patch: u32,
+    pub prerelease: Option<(u8, u32)>,
 }
 
 impl NativeRelayVersion {
@@ -34,13 +35,17 @@ impl NativeRelayVersion {
         }
         let major = parts[0].parse().map_err(|_| format!("invalid major version: {}", parts[0]))?;
         let minor = parts[1].parse().map_err(|_| format!("invalid minor version: {}", parts[1]))?;
-        let patch = parts[2].parse().map_err(|_| format!("invalid patch version: {}", parts[2]))?;
-        Ok(Self {
-            version: version.to_string(),
-            major,
-            minor,
-            patch,
-        })
+        let patch_part = parts[2];
+        let digits: String = patch_part.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() { return Err(format!("invalid patch version: {}", patch_part)); }
+        let patch = digits.parse().map_err(|_| format!("invalid patch version: {}", patch_part))?;
+        let suffix = &patch_part[digits.len()..];
+        let prerelease = if suffix.is_empty() { None }
+            else if let Some(n) = suffix.strip_prefix('a') { Some((0, n.parse().map_err(|_| format!("invalid alpha version: {suffix}"))?)) }
+            else if let Some(n) = suffix.strip_prefix('b') { Some((1, n.parse().map_err(|_| format!("invalid beta version: {suffix}"))?)) }
+            else if let Some(n) = suffix.strip_prefix("rc") { Some((2, n.parse().map_err(|_| format!("invalid release candidate: {suffix}"))?)) }
+            else { return Err(format!("unsupported version suffix: {suffix}")); };
+        Ok(Self { version: version.to_string(), major, minor, patch, prerelease })
     }
 
     /// Check if this version is compatible with AgentTrace
@@ -73,6 +78,12 @@ impl PartialOrd for NativeRelayVersion {
 impl Ord for NativeRelayVersion {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         (self.major, self.minor, self.patch).cmp(&(other.major, other.minor, other.patch))
+            .then_with(|| match (&self.prerelease, &other.prerelease) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (Some(a), Some(b)) => a.cmp(b),
+            })
     }
 }
 
@@ -467,31 +478,27 @@ pub fn find_executable() -> Option<PathBuf> {
 
 /// Get the version of NativeRelay by running `nativerelay --version`
 pub fn get_version(executable: &Path) -> Option<String> {
-    let output = Command::new(executable)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !version.is_empty() {
-            return Some(version);
+    for flag in ["--version", "-V"] {
+        if let Ok(output) = Command::new(executable).arg(flag).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).output() {
+            if output.status.success() {
+                let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !value.is_empty() { return Some(value); }
+            }
         }
     }
-    // Fallback: try -V
-    let output = Command::new(executable)
-        .arg("-V")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !version.is_empty() {
-            return Some(version);
+    #[cfg(windows)]
+    if let Some(python) = executable.parent().and_then(Path::parent).map(|p| p.join("python.exe")) {
+        if python.is_file() {
+            if let Ok(output) = Command::new(python).args(["-c", "from importlib.metadata import version; print(version('nativerelay'))"])
+                .stdout(Stdio::piped()).stderr(Stdio::null()).output() {
+                if output.status.success() { return Some(String::from_utf8_lossy(&output.stdout).trim().to_string()); }
+            }
+        }
+    }
+    for python in ["python", "python3"] {
+        if let Ok(output) = Command::new(python).args(["-c", "from importlib.metadata import version; print(version('nativerelay'))"])
+            .stdout(Stdio::piped()).stderr(Stdio::null()).output() {
+            if output.status.success() { return Some(String::from_utf8_lossy(&output.stdout).trim().to_string()); }
         }
     }
     None
@@ -951,6 +958,10 @@ mod tests {
         assert_eq!(v.minor, 3);
         assert_eq!(v.patch, 2);
         assert_eq!(v.version, "0.3.2");
+        let beta = NativeRelayVersion::parse("0.4.0b1").unwrap();
+        let release = NativeRelayVersion::parse("0.4.0").unwrap();
+        assert!(beta < release);
+        assert!(beta.is_compatible());
     }
 
     #[test]
