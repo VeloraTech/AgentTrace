@@ -1,186 +1,157 @@
 name: NativeRelay Integration
 
 on:
-  pull_request:
   push:
-    branches: ['**']
-  workflow_dispatch:
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: read
 
 jobs:
-  nativerelay-linux:
-    name: NativeRelay Linux integration
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+  test-windows:
+    name: Windows NativeRelay Test
+    runs-on: windows-2025
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install NativeRelay 0.3.2
-        run: python -m pip install nativerelay==0.3.2
-      - name: Run existing test suite
-        run: npm test
-      - name: Build AgentTrace
-        run: cargo build --locked
-      - name: Check for root/capabilities
-        id: check-root
-        run: |
-          echo "Checking for root/capabilities..."
-          echo "uid=$(id -u)"
-          id -u
-          if [ "$(id -u)" -eq 0 ]; then
-            echo "Running as root"
-            echo "has_privileges=true" >> $GITHUB_OUTPUT
-          elif command -v capsh >/dev/null; then
-            echo "capsh available, checking capabilities..."
-            capsh --print
-            # Check for effective capabilities
-            if capsh --print | grep -E "Current.*cap_net_admin" || capsh --print | grep -E "Current.*cap_sys_admin"; then
-              echo "Has required capabilities in effective set"
-              echo "has_privileges=true" >> $GITHUB_OUTPUT
-            else
-              echo "Missing required capabilities in effective set"
-              echo "has_privileges=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "capsh not available, assuming no privileges"
-            echo "has_privileges=false" >> $GITHUB_OUTPUT
-          fi
-      - name: Verify NativeRelay integration (full with privileges)
-        if: steps.check-root.outputs.has_privileges == 'true'
-        run: bash scripts/test-nativerelay-linux.sh
-      - name: Verify NativeRelay integration (basic without privileges)
-        if: steps.check-root.outputs.has_privileges != 'true'
-        run: |
-          echo "Running without root/CAP_NET_ADMIN/CAP_SYS_ADMIN - testing basic integration only"
-          agenttrace_bin="target/debug/agenttrace"
-          test_dir=$(mktemp -d)
-          history_file="$test_dir/history.jsonl"
-          
-          # Test that AgentTrace can start NativeRelay and communicate with it
-          # Capture stdout to check for session_started event
-          timeout 15 "$agenttrace_bin" run --native-relay --json --output "$history_file" >"$test_dir/stdout.log" 2>"$test_dir/stderr.log" &
-          pid=$!
-          sleep 10
-          kill -INT $pid 2>/dev/null || true
-          wait $pid 2>/dev/null || true
-          
-          # Debug: show outputs
-          echo "=== STDOUT ==="
-          cat "$test_dir/stdout.log"
-          echo "=== STDERR ==="
-          cat "$test_dir/stderr.log"
-          echo "=== HISTORY FILE ==="
-          cat "$history_file" 2>/dev/null || echo "(no history file)"
-          echo "=== END ==="
-          
-          # Verify session started (check stdout for session_started event)
-          if grep -q '"event_type":"session_started"' "$test_dir/stdout.log" && \
-             grep -q '"enabled":true' "$test_dir/stdout.log"; then
-            echo "✅ Basic NativeRelay integration works (process spawn + JSONL communication)"
-            exit 0
-          else
-            echo "❌ NativeRelay integration failed"
-            exit 1
-          fi
 
-  nativerelay-windows:
-    name: NativeRelay Windows integration
-    runs-on: windows-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          target: x86_64-pc-windows-msvc
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          architecture: x64
-      - name: Install NativeRelay 0.3.2
-        run: python -m pip install nativerelay==0.3.2
-      - name: Run existing test suite
-        run: npm test
+          targets: x86_64-pc-windows-msvc
+
       - name: Build AgentTrace
         run: cargo build --locked
-      - name: Verify NativeRelay Windows availability
+
+      - name: Run NativeRelay integration test
+        id: test
         shell: pwsh
         run: |
-          # NativeRelay collectors not implemented on Windows yet
-          # This test verifies AgentTrace handles missing NativeRelay gracefully
-          $agenttrace_bin = "target\debug\agenttrace.exe"
-          $test_dir = (New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\nativerelay-test").FullName
+          $agenttrace_bin = "${{ github.workspace }}\target\debug\agenttrace.exe"
+          $test_dir = New-TemporaryFile | ForEach-Object { $_.DirectoryName + "\" + $_.BaseName }
+          New-Item -ItemType Directory -Path $test_dir | Out-Null
           $history_file = "$test_dir\history.jsonl"
+          $agenttrace_stdout = "$test_dir\agenttrace.stdout"
+          $agenttrace_stderr = "$test_dir\agenttrace.stderr"
 
-          # Test without --native-relay (should work)
-          # Use --duration-ms to let the process exit cleanly instead of force-killing
-          $proc = Start-Process $agenttrace_bin -ArgumentList "run", "--watch", "--json", "--output", "$history_file", "--duration-ms", "10000" -PassThru -RedirectStandardOutput "$test_dir\stdout.log" -RedirectStandardError "$test_dir\stderr.log"
-          $procId = $proc.Id
-          Write-Host "Started agenttrace with PID: $procId"
-          # Wait for process to exit (with --duration-ms 10000 it should exit within ~10-12 seconds)
-          $proc.WaitForExit(15000)
-          $exitCode = $proc.ExitCode
-          Write-Host "Process exited with code: $exitCode"
-          
-          # Debug: check outputs
-          Write-Host "=== STDOUT ==="
-          Get-Content "$test_dir\stdout.log" -ErrorAction SilentlyContinue | Write-Host
-          Write-Host "=== STDERR ==="
-          Get-Content "$test_dir\stderr.log" -ErrorAction SilentlyContinue | Write-Host
-          
-          # Debug: check if history file exists
-          Write-Host "History file exists: $(Test-Path $history_file)"
-          if (Test-Path $history_file) {
-            Write-Host "History file size: $(Get-Item $history_file).Length bytes"
-            Write-Host "First 500 chars: $(Get-Content $history_file -Raw | Select-Object -First 500)"
-          } else {
-            Write-Host "ERROR: History file not found at $history_file"
-            Write-Host "Test dir contents: $(Get-ChildItem $test_dir -Recurse | ForEach-Object { $_.FullName })"
+          # Run agenttrace with native-relay
+          $process = Start-Process -FilePath $agenttrace_bin -ArgumentList "run", "--native-relay", "--json", "--output", $history_file -RedirectStandardOutput $agenttrace_stdout -RedirectStandardError $agenttrace_stderr -PassThru
+          $agenttrace_pid = $process.Id
+
+          # Wait for session to start and native relay to report running
+          $ready = $false
+          $agenttrace_process_pid = $null
+          $native_pid = $null
+
+          for ($i = 0; $i -lt 80; $i++) {
+            if (-not (Get-Process -Id $agenttrace_pid -ErrorAction SilentlyContinue)) {
+              Write-Error "AgentTrace exited before NativeRelay reported a running collector."
+              Get-Content $agenttrace_stdout, $agenttrace_stderr -ErrorAction SilentlyContinue | Write-Host
+              exit 1
+            }
+
+            if (Test-Path $history_file) {
+              if (-not $agenttrace_process_pid) {
+                $session_id = Get-Content $history_file | ConvertFrom-Json | Where-Object { $_.event_type -eq "session_started" } | Select-Object -First 1 -ExpandProperty session_id
+                if ($session_id) {
+                  $agenttrace_process_pid = $session_id.Split("-")[0]
+                }
+              }
+
+              $status = Get-Content $history_file | ConvertFrom-Json | Where-Object { $_.event_type -eq "native_relay.status" -and $_.data.native_record.state -eq "running" } | Select-Object -First 1
+              if ($status) {
+                $ready = $true
+                break
+              }
+            }
+            Start-Sleep -Milliseconds 250
           }
-          
-          # Verify session works without NativeRelay
-          if (Test-Path $history_file -and (Select-String -Path $history_file -Pattern '"event_type":"session_started"')) {
-            Write-Host "✅ AgentTrace works on Windows without NativeRelay"
-            exit 0
-          } else {
-            Write-Host "❌ AgentTrace failed on Windows"
-            if (Test-Path $history_file) { Get-Content $history_file }
+
+          if (-not $ready) {
+            Write-Error "NativeRelay did not report a running collector."
+            Get-Content $agenttrace_stdout, $agenttrace_stderr, $history_file -ErrorAction SilentlyContinue | Write-Host
             exit 1
           }
-      - name: Verify NativeRelay missing handling
-        shell: pwsh
-        run: |
-          # Test that --native-relay gives actionable error on Windows
-          $agenttrace_bin = "target\debug\agenttrace.exe"
-          $test_dir = (New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\nativerelay-test2").FullName
-          $history_file = "$test_dir\history.jsonl"
 
-          # Run with --native-relay and capture stderr - process should exit with error
-          $proc = Start-Process $agenttrace_bin -ArgumentList "run", "--native-relay", "--json", "--output", "$history_file" -PassThru -RedirectStandardError "$test_dir\stderr.txt" -RedirectStandardOutput "$test_dir\stdout.txt"
-          $procId = $proc.Id
-          Write-Host "Started agenttrace with PID: $procId"
-          # Wait for process to exit (should fail quickly on Windows)
-          $proc.WaitForExit(10000)
-          $exitCode = $proc.ExitCode
-          Write-Host "Process exited with code: $exitCode"
-          
-          $stderr = Get-Content $test_dir\stderr.txt -Raw
-          if ($stderr -match "not available on this platform" -or $stderr -match "NativeRelay collector is not available") {
-            Write-Host "✅ Correctly reports NativeRelay unavailable on Windows"
-            exit 0
-          } else {
-            Write-Host "❌ Should report NativeRelay unavailable on Windows"
-            Write-Host "Stderr: $stderr"
+          # Generate some activity to observe
+          $activity_file = "$PWD\.nativerelay-integration-activity-$PID.txt"
+          "test" | Out-File -Encoding utf8 $activity_file
+
+          # Probe process
+          $probe = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "timeout", "/t", "2" -PassThru
+          $probe_pid = $probe.Id
+          $probe.WaitForExit()
+
+          # Verify observations
+          $verified = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            if (Test-Path $history_file) {
+              $observations = Get-Content $history_file | ConvertFrom-Json | Where-Object { $_.event_type -eq "native_relay.observation" } | Select-Object -ExpandProperty data.native_record
+              $file_opened = $observations | Where-Object { $_.type -eq "file.opened" -and $_.resource.path -eq $activity_file }
+              $process_started = $observations | Where-Object { $_.type -eq "process.started" -and $_.process.pid -eq $probe_pid }
+              $process_exited = $observations | Where-Object { $_.type -eq "process.exited" -and $_.process.pid -eq $probe_pid }
+
+              if ($file_opened -and $process_started -and $process_exited) {
+                Write-Host "Verified NativeRelay observations: file.opened, process.started, process.exited (PID $probe_pid)"
+                $verified = $true
+                break
+              }
+            }
+            Start-Sleep -Milliseconds 250
+          }
+
+          if (-not $verified) {
+            Write-Error "Timed out waiting for required real observations."
+            Get-Content $agenttrace_stdout, $agenttrace_stderr, $history_file -ErrorAction SilentlyContinue | Write-Host
             exit 1
           }
+
+          # Stop agenttrace gracefully (send Ctrl+C equivalent)
+          $process = Get-Process -Id $agenttrace_pid -ErrorAction SilentlyContinue
+          if ($process) {
+            # Send Ctrl+C to the process group
+            $sigint = [System.Console]::CancelKeyPress
+            # Use taskkill with /PID and /T to kill process tree, but first try graceful
+            try {
+              $process.CloseMainWindow()  # This sends WM_CLOSE, similar to SIGTERM
+              $process.WaitForExit(5000)
+            } catch {
+              Stop-Process -Id $agenttrace_pid -Force -ErrorAction SilentlyContinue
+            }
+          }
+          $exit_code = 0
+          try {
+            $process = Get-Process -Id $agenttrace_pid -ErrorAction Stop
+            $process.WaitForExit()
+            $exit_code = $process.ExitCode
+          } catch {
+            $exit_code = 1
+          }
+
+          if ($exit_code -ne 0) {
+            Write-Error "AgentTrace exited with status $exit_code after SIGINT."
+            Get-Content $agenttrace_stdout, $agenttrace_stderr, $history_file -ErrorAction SilentlyContinue | Write-Host
+            exit 1
+          }
+
+          # Verify session stopped cleanly
+          $stopped = Get-Content $history_file | ConvertFrom-Json | Where-Object { $_.event_type -eq "session_stopped" } | Select-Object -Last 1
+          $statuses = Get-Content $history_file | ConvertFrom-Json | Where-Object { $_.event_type -eq "native_relay.status" } | Select-Object -ExpandProperty data.native_record
+
+          if (-not $stopped -or $stopped.data.trace_complete -ne $true -or $stopped.data.observations_lost_or_incomplete -ne $false) {
+            Write-Error "Session not marked complete: $($stopped.data)"
+            exit 1
+          }
+
+          $clean_shutdown = $statuses | Where-Object { $_.state -eq "stopped" -and $_.clean_shutdown -eq $true }
+          if (-not $clean_shutdown) {
+            Write-Error "NativeRelay did not report a clean stopped status"
+            exit 1
+          }
+
+          Write-Host "Verified complete AgentTrace session and NativeRelay clean shutdown"
+
+          # Cleanup
+          Remove-Item -Path $activity_file -ErrorAction SilentlyContinue
+          Remove-Item -Path $test_dir -Recurse -Force -ErrorAction SilentlyContinue
