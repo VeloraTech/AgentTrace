@@ -232,6 +232,11 @@ impl Process {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x00000200); // CREATE_NEW_PROCESS_GROUP
+        }
         let mut child = command.spawn().map_err(|e| {
             if e.kind() == io::ErrorKind::NotFound {
                 missing_error()
@@ -278,7 +283,16 @@ impl Process {
                 }
             }
             #[cfg(windows)]
-            self.child.kill()?;
+            {
+                #[link(name = "Kernel32")]
+                unsafe extern "system" {
+                    fn GenerateConsoleCtrlEvent(ctrl_event: u32, process_group_id: u32) -> i32;
+                }
+                // NativeRelay handles SIGBREAK and flushes its final status record.
+                if unsafe { GenerateConsoleCtrlEvent(1, self.child.id()) } == 0 {
+                    let _ = self.child.kill();
+                }
+            }
 
             let deadline = Instant::now() + SHUTDOWN_GRACE_PERIOD;
             while Instant::now() < deadline {
