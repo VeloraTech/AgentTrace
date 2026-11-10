@@ -1084,6 +1084,9 @@ mod tests {
         {
             let info = discover_nativerelay();
             assert_eq!(info.compatibility, CompatibilityStatus::Unavailable);
+            #[cfg(target_os = "windows")]
+            assert_eq!(info.platform_support, PlatformSupport::Degraded);
+            #[cfg(not(target_os = "windows"))]
             assert_eq!(info.platform_support, PlatformSupport::Unavailable);
             // Note: can_start depends on whether there's a nativerelay executable in PATH
             // which can vary by environment, so we don't assert on it
