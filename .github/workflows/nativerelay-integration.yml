@@ -79,7 +79,7 @@ jobs:
 
             # Toolhelp fallback polls every 200ms; keep this child alive long enough to observe.
             $probe = Start-Process -FilePath "$env:WINDIR\System32\ping.exe" -ArgumentList @("127.0.0.1", "-n", "5") -PassThru
-            $probePid = $probe.Id
+            $targetProcessId = $probe.Id
             $probe.WaitForExit()
 
             $verified = $false
@@ -89,8 +89,8 @@ jobs:
                 $observations = @($records | Where-Object { $_.event_type -eq "native_relay.observation" } | ForEach-Object { $_.data.native_record })
                 $created = $observations | Where-Object { $_.type -eq "file.created" -and $_.resource.path -like "*activity.txt" }
                 $modified = $observations | Where-Object { $_.type -eq "file.modified" -and $_.resource.path -like "*activity.txt" }
-                $started = $observations | Where-Object { $_.type -eq "process.started" -and $_.process.pid -eq $probePid }
-                $exited = $observations | Where-Object { $_.type -eq "process.exited" -and $_.process.pid -eq $probePid }
+                $started = $observations | Where-Object { $_.type -eq "process.started" -and $_.process.pid -eq $targetProcessId }
+                $exited = $observations | Where-Object { $_.type -eq "process.exited" -and $_.process.pid -eq $targetProcessId }
                 if ($created -and $modified -and $started -and $exited) { $verified = $true; break }
               }
               Start-Sleep -Milliseconds 200
@@ -99,7 +99,7 @@ jobs:
               Get-Content $stdout, $stderr, $history -ErrorAction SilentlyContinue | Write-Host
               throw "Expected file.created/file.modified and process.started/process.exited observations were not all received."
             }
-            Write-Host "Verified NativeRelay Windows file and process observations (PID $probePid)."
+            Write-Host "Verified NativeRelay Windows file and process observations (PID $targetProcessId)."
           }
           finally {
             if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
