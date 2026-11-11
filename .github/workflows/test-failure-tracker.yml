@@ -6,179 +6,205 @@ on:
     types: [completed]
 
 permissions:
+  actions: read
   contents: read
   issues: write
 
 jobs:
-  track-failures:
-    name: Track Test Failures
-    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+  track-test-results:
+    name: Track failed and recovered tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - name: Download test logs
-        uses: actions/github-script@v7
-        id: download-logs
-        with:
-          script: |
-            const runId = ${{ github.event.workflow_run.id }};
-            const logs = await github.rest.actions.downloadWorkflowRunLogs({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              run_id: runId,
-            });
-            return logs.data;
-
-      - name: Extract failed tests
-        id: extract-tests
+      - name: Download workflow logs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: |
-          echo "${{ steps.download-logs.outputs.result }}" | base64 -d > logs.zip
-          unzip -o logs.zip -d logs/
-          FAILED_TESTS=()
-          for log_file in $(find logs -name "*.log" -o -name "*.txt" 2>/dev/null); do
-            while IFS= read -r line; do
-              if [[ "$line" =~ ^test\ (.+)\ \.\.\.\ FAILED$ ]]; then
-                FAILED_TESTS+=("${BASH_REMATCH[1]}")
-              fi
-              if [[ "$line" =~ ^\ \ \ \ test\ (.+)$ ]] && [[ "$prev_line" =~ ^failures:$ ]]; then
-                FAILED_TESTS+=("${BASH_REMATCH[1]}")
-              fi
-              prev_line="$line"
-            done < "$log_file"
-          done
-          printf '%s\n' "${FAILED_TESTS[@]}" | sort -u > failed_tests.txt
-          if [[ -s failed_tests.txt ]]; then
-            echo "failed=true" >> $GITHUB_OUTPUT
-            echo "tests<<EOF" >> $GITHUB_OUTPUT
-            cat failed_tests.txt >> $GITHUB_OUTPUT
-            echo "EOF" >> $GITHUB_OUTPUT
+          if [ "$CONCLUSION" = "failure" ]; then
+            gh run view "$RUN_ID" --log-failed > workflow.log
           else
-            echo "failed=false" >> $GITHUB_OUTPUT
+            gh run view "$RUN_ID" --log > workflow.log
           fi
 
-      - name: Create/Update failure issues
-        if: ${{ steps.extract-tests.outputs.failed == 'true' }}
+      - name: Extract test results
+        id: extract
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+          rust = re.compile(r"\btest\s+([\w:./-]+)\s+\.\.\.\s+(FAILED|ok)\b")
+          python_test = re.compile(r"\b([\w.]+\s+\([^)]*\))\s+\.\.\.\s+(FAIL|ERROR|ok)\b")
+          python_failure = re.compile(r"^\s*(?:FAIL|ERROR):\s*(.+?)\s*$")
+          tap = re.compile(r"^\s*(not ok|ok)\s+\d+\s*-\s*(.+?)\s*$")
+          jest = re.compile(r"^\s*([✕✓✔])\s+(.+?)\s*$")
+
+          failed, passed = set(), set()
+          for raw in Path("workflow.log").read_text(errors="replace").splitlines():
+              line = ansi.sub("", raw).strip()
+              match = rust.search(line)
+              if match:
+                  (failed if match.group(2) == "FAILED" else passed).add(match.group(1))
+                  continue
+              match = python_test.search(line)
+              if match:
+                  (failed if match.group(2) in {"FAIL", "ERROR"} else passed).add(match.group(1))
+                  continue
+              match = python_failure.search(line)
+              if match:
+                  failed.add(match.group(1))
+                  continue
+              match = tap.search(line)
+              if match:
+                  (failed if match.group(1) == "not ok" else passed).add(match.group(2))
+                  continue
+              match = jest.search(line)
+              if match:
+                  (failed if match.group(1) == "✕" else passed).add(match.group(2))
+
+          report = {"failed": sorted(failed), "passed": sorted(passed)}
+          with open(Path(os.environ["GITHUB_OUTPUT"]), "a", encoding="utf-8") as output:
+              output.write("report=" + json.dumps(report, separators=(",", ":")) + "\n")
+          print(json.dumps(report, indent=2))
+          PY
+
+      - name: Create, update, or resolve test failure issues
         uses: actions/github-script@v7
         env:
-          FAILED_TESTS: ${{ steps.extract-tests.outputs.tests }}
-          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          REPORT: ${{ steps.extract.outputs.report }}
           RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
           COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
           WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
-        script: |
-          const failedTests = process.env.FAILED_TESTS.trim().split('
-').filter(t => t);
-          const runUrl = process.env.RUN_URL;
-          const runId = process.env.RUN_ID;
-          const commitSha = process.env.COMMIT_SHA;
-          const workflowName = process.env.WORKFLOW_NAME;
-          for (const testName of failedTests) {
-            const issueTitle = `[Test Failure] ${testName}`;
-            const existingIssues = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: 'test-failure',
-              per_page: 100
-            });
-            const existingIssue = existingIssues.data.find(issue => issue.title === issueTitle);
-            const body = `## Test Failure: \`${testName}\`
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        with:
+          script: |
+            const report = JSON.parse(process.env.REPORT || '{"failed":[],"passed":[]}');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const workflowName = process.env.WORKFLOW_NAME;
+            const runId = process.env.RUN_ID;
+            const runUrl = process.env.RUN_URL;
+            const commit = process.env.COMMIT_SHA;
+            const conclusion = process.env.CONCLUSION;
+            const commitShort = commit.slice(0, 7);
+            const now = new Date().toISOString();
+            const tick = String.fromCharCode(96);
 
-**Workflow:** ${workflowName}
-**Run:** [#${runId}](${runUrl})
-**Commit:** \`${commitSha.substring(0, 7)}\`
-**Time:** ${new Date().toISOString()}
-
----
-
-### Failure Details
-\`\`\`
-Test \`${testName}\` failed in workflow run [#${runId}](${runUrl}).
-
-View full logs: ${runUrl}
-\`\`\`
-
----
-
-*This issue is automatically tracked. It will be closed when the test passes again.*`;
-            if (existingIssue) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: existingIssue.number,
-                body: `### New Failure: ${new Date().toISOString()}
-
-**Workflow:** ${workflowName}
-**Run:** [#${runId}](${runUrl})
-**Commit:** \`${commitSha.substring(0, 7)}\`
-
-View logs: ${runUrl}
-
----`
-              });
-              console.log(`Updated existing issue #${existingIssue.number} for ${testName}`);
-            } else {
-              const newIssue = await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title: issueTitle,
-                body: body,
-                labels: ['test-failure', 'auto-tracked']
-              });
-              console.log(`Created new issue #${newIssue.number} for ${testName}`);
+            for (const label of [
+              { name: 'test-failure', color: 'd73a4a', description: 'Automatically tracked test or CI failures' },
+              { name: 'auto-tracked', color: '6f42c1', description: 'Created or maintained by the test failure tracker' }
+            ]) {
+              try {
+                await github.rest.issues.createLabel({ owner, repo, ...label });
+              } catch (error) {
+                if (error.status !== 422) throw error;
+              }
             }
-          }
 
-  auto-close-resolved:
-    name: Auto-Close Resolved Issues
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Close resolved test failure issues
-        uses: actions/github-script@v7
-        env:
-          RUN_URL: ${{ github.event.workflow_run.html_url }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
-          COMMIT_SHA: ${{ github.event.workflow_run.head_sha }}
-          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
-        script: |
-          const runUrl = process.env.RUN_URL;
-          const runId = process.env.RUN_ID;
-          const commitSha = process.env.COMMIT_SHA;
-          const workflowName = process.env.WORKFLOW_NAME;
-          const issues = await github.paginate(github.rest.issues.listForRepo, {
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            state: 'open',
-            labels: 'test-failure',
-            per_page: 100
-          });
-          for (const issue of issues) {
-            const match = issue.title.match(/^\[Test Failure\]\s+(.+)$/);
-            if (!match) continue;
-            const testName = match[1];
-            await github.rest.issues.update({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issue.number,
-              state: 'closed',
-              state_reason: 'completed'
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'all', labels: 'test-failure', per_page: 100
             });
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: issue.number,
-              body: `[SUCCESS] **Test Resolved**
+            const trackedIssues = issues.filter(issue => !issue.pull_request);
 
-This test (\`${testName}\`) is now passing again.
+            async function findIssue(title) {
+              return trackedIssues.find(issue => issue.title === title);
+            }
 
-**Resolved in workflow run:** [#${runId}](${runUrl})
-**Commit:** \`${commitSha.substring(0, 7)}\`
-**Workflow:** ${workflowName}
-**Time:** ${new Date().toISOString()}
+            async function upsertFailure(title, identity, jobName = null) {
+              const details = [
+                '## Automated failure: ' + tick + identity + tick,
+                '',
+                '**Workflow:** ' + workflowName,
+                jobName ? '**Job:** ' + jobName : null,
+                '**Run:** [#' + runId + '](' + runUrl + ')',
+                '**Commit:** ' + tick + commitShort + tick,
+                '**Detected:** ' + now,
+                '',
+                'The failure was detected from the completed workflow logs. Review the run before changing code.',
+                '',
+                '[Open workflow logs](' + runUrl + ')'
+              ].filter(Boolean).join('\n');
+              const existing = await findIssue(title);
+              if (!existing) {
+                const created = await github.rest.issues.create({
+                  owner, repo, title, body: details,
+                  labels: ['test-failure', 'auto-tracked']
+                });
+                core.info('Created issue #' + created.data.number + ': ' + title);
+                trackedIssues.push(created.data);
+                return;
+              }
+              if (existing.state === 'closed') {
+                await github.rest.issues.update({
+                  owner, repo, issue_number: existing.number,
+                  state: 'open', state_reason: 'reopened'
+                });
+              }
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: '### Failure observed again — ' + now + '\n\n' + details
+              });
+              core.info('Updated existing issue #' + existing.number + ': ' + title);
+            }
 
----`
-            });
-            console.log(`Closed issue #${issue.number} for ${testName}`);
-          }
+            async function resolveIssue(issue, identity) {
+              await github.rest.issues.update({
+                owner, repo, issue_number: issue.number,
+                state: 'closed', state_reason: 'completed'
+              });
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issue.number,
+                body: '[RESOLVED] **Test passing again**\n\nThe same test identity (' + tick + identity + tick + ') was found passing in workflow **' + workflowName + '**.\n\n**Successful run:** [#' + runId + '](' + runUrl + ')\n**Commit:** ' + tick + commitShort + tick + '\n**Time:** ' + now
+              });
+              core.info('Closed resolved issue #' + issue.number + ': ' + issue.title);
+            }
+
+            if (conclusion === 'failure') {
+              if (report.failed.length) {
+                for (const testName of report.failed) {
+                  await upsertFailure('[Test Failure] ' + testName, testName);
+                }
+              } else {
+                const { data } = await github.rest.actions.listJobsForWorkflowRun({
+                  owner, repo, run_id: Number(runId), per_page: 100
+                });
+                const failedJobs = data.jobs.filter(job => job.conclusion === 'failure');
+                if (!failedJobs.length) {
+                  await upsertFailure('[CI Failure] ' + workflowName, workflowName);
+                } else {
+                  for (const job of failedJobs) {
+                    const identity = workflowName + ' / ' + job.name;
+                    await upsertFailure('[CI Failure] ' + identity, identity, job.name);
+                  }
+                }
+              }
+              return;
+            }
+
+            if (conclusion === 'success') {
+              for (const testName of report.passed) {
+                const issue = await findIssue('[Test Failure] ' + testName);
+                if (issue && issue.state === 'open' && issue.body && issue.body.includes('**Workflow:** ' + workflowName)) {
+                  await resolveIssue(issue, testName);
+                }
+              }
+
+              const { data } = await github.rest.actions.listJobsForWorkflowRun({
+                owner, repo, run_id: Number(runId), per_page: 100
+              });
+              const successfulJobs = new Set(data.jobs.filter(job => job.conclusion === 'success').map(job => job.name));
+              for (const issue of trackedIssues) {
+                if (issue.state !== 'open' || !issue.title.startsWith('[CI Failure] ')) continue;
+                const identity = issue.title.slice('[CI Failure] '.length);
+                const prefix = workflowName + ' / ';
+                if (!identity.startsWith(prefix)) continue;
+                const jobName = identity.slice(prefix.length);
+                if (successfulJobs.has(jobName)) await resolveIssue(issue, identity);
+              }
+            }
