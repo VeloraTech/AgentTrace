@@ -2,7 +2,7 @@ name: NativeRelay Integration
 
 on:
   push:
-    branches: [main, "feature/nativerelay-pypi-integration"]
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
