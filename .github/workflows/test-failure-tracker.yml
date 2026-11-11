@@ -169,7 +169,7 @@ jobs:
             if (conclusion === 'failure') {
               if (report.failed.length) {
                 for (const testName of report.failed) {
-                  await upsertFailure('[Test Failure] ' + testName, testName);
+                  await upsertFailure('[Test Failure] ' + workflowName + ' :: ' + testName, testName);
                 }
               } else {
                 const { data } = await github.rest.actions.listJobsForWorkflowRun({
@@ -190,7 +190,7 @@ jobs:
 
             if (conclusion === 'success') {
               for (const testName of report.passed) {
-                const issue = await findIssue('[Test Failure] ' + testName);
+                const issue = await findIssue('[Test Failure] ' + workflowName + ' :: ' + testName);
                 if (issue && issue.state === 'open' && issue.body && issue.body.includes('**Workflow:** ' + workflowName)) {
                   await resolveIssue(issue, testName);
                 }
