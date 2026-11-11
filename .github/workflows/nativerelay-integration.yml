@@ -87,8 +87,8 @@ jobs:
               if (Test-Path $history) {
                 $records = @(Get-Content $history | ForEach-Object { try { $_ | ConvertFrom-Json } catch {} })
                 $observations = @($records | Where-Object { $_.event_type -eq "native_relay.observation" } | ForEach-Object { $_.data.native_record })
-                $created = $observations | Where-Object { $_.type -eq "file.created" -and $_.resource.path -like "*activity.txt" }
-                $modified = $observations | Where-Object { $_.type -eq "file.modified" -and $_.resource.path -like "*activity.txt" }
+                $created = $observations | Where-Object { $_.type -eq "file.created" -and $_.resource.path -like "*nativerelay-integration-activity-*" }
+                $modified = $observations | Where-Object { $_.type -eq "file.modified" -and $_.resource.path -like "*nativerelay-integration-activity-*" }
                 $started = $observations | Where-Object { $_.type -eq "process.started" -and $_.process.pid -eq $targetProcessId }
                 $exited = $observations | Where-Object { $_.type -eq "process.exited" -and $_.process.pid -eq $targetProcessId }
                 if ($created -and $modified -and $started -and $exited) { $verified = $true; break }
