@@ -658,7 +658,7 @@ pub fn parse_status_record(record: &Value) -> Result<NativeRelayStatus, String> 
 /// Generate actionable error message for missing NativeRelay
 pub fn missing_error() -> String {
     format!(
-        "NativeRelay is required but was not found ({}). On Windows, download the compatible wheel from https://github.com/VeloraTech/NativeRelay/releases and install it with: python -m pip install <wheel-path>. Ensure Python's Scripts directory is on PATH.",
+        "NativeRelay is required but was not found ({}). Install the tested release with: python -m pip install nativerelay==0.4.0. On Windows, ensure Python\'s Scripts directory is on PATH.",
         version_range_string()
     )
 }
@@ -691,7 +691,7 @@ pub fn start_error(path: &Path, error: &str, platform_support: PlatformSupport) 
     match platform_support {
         PlatformSupport::Unavailable => {
             msg.push_str("NativeRelay collector is not available on this platform.\n");
-            msg.push_str("Supported platforms: Linux (with CN_PROC + fanotify)\n");
+            msg.push_str("Supported platforms: Linux (CN_PROC + fanotify) and Windows (WMI/Toolhelp + scoped filesystem notifications)\n");
         }
         PlatformSupport::Degraded => {
             msg.push_str("NativeRelay may have limited functionality on this platform.\n");
