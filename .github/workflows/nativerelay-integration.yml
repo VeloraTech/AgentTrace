@@ -1,33 +1,108 @@
-﻿name: NativeRelay Linux integration
+name: NativeRelay Integration
 
 on:
-  pull_request:
   push:
-    branches: ['**']
+    branches: [main, "feature/nativerelay-pypi-integration"]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  nativerelay-linux:
-    name: NativeRelay 0.2.0 Linux end-to-end
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+  test-windows:
+    name: Windows NativeRelay Test
+    runs-on: windows-2025
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
+
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - name: Install NativeRelay 0.2.0
-        run: python -m pip install nativerelay==0.2.0
-      - name: Run existing test suite
-        run: npm test
+          python-version: "3.12"
+
+      - name: Install pinned NativeRelay beta wheel
+        shell: pwsh
+        run: |
+          $wheel = "nativerelay-0.4.0b1-py3-none-any.whl"
+          $url = "https://github.com/VeloraTech/NativeRelay/releases/download/v0.4.0b1/$wheel"
+          $destination = Join-Path $env:RUNNER_TEMP $wheel
+          Invoke-WebRequest -Uri $url -OutFile $destination
+          $expected = "62e9db9469e1e8eb32f3aaea7c5dd1d4d98065152b95d3f78ad3e4d62b40672c"
+          $actual = (Get-FileHash -Algorithm SHA256 $destination).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "NativeRelay wheel SHA256 mismatch: $actual" }
+          python -m pip install --disable-pip-version-check --no-deps $destination
+          $scripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
+          Add-Content $env:GITHUB_PATH $scripts
+          $installed = python -c "from importlib.metadata import version; print(version('nativerelay'))"
+          if ($installed -ne "0.4.0b1") { throw "Unexpected NativeRelay version: $installed" }
+          if (-not (Test-Path (Join-Path $scripts "nativerelay.exe"))) { throw "nativerelay.exe missing from Python Scripts directory" }
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Run Rust tests
+        run: cargo test --locked
+
       - name: Build AgentTrace
         run: cargo build --locked
-      - name: Verify real Linux NativeRelay observations, recording, and shutdown
-        run: bash scripts/test-nativerelay-linux.sh
+
+      - name: Run NativeRelay live integration test
+        shell: pwsh
+        run: |
+          $agenttrace = Join-Path $env:GITHUB_WORKSPACE "target\debug\agenttrace.exe"
+          $testDir = Join-Path $env:RUNNER_TEMP ("agenttrace-native-" + [guid]::NewGuid().ToString("N"))
+          New-Item -ItemType Directory -Path $testDir | Out-Null
+          $history = Join-Path $testDir "history.jsonl"
+          $stdout = Join-Path $testDir "agenttrace.stdout"
+          $stderr = Join-Path $testDir "agenttrace.stderr"
+          $activity = Join-Path $env:GITHUB_WORKSPACE ".nativerelay-integration-activity-$PID.txt"
+          $p = Start-Process -FilePath $agenttrace -ArgumentList @("run", "--native-relay", "--json", "--output", $history) -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 100; $i++) {
+              if ($p.HasExited) { throw "AgentTrace exited before NativeRelay started. $((Get-Content $stderr -Raw -ErrorAction SilentlyContinue))" }
+              if (Test-Path $history) {
+                $records = @(Get-Content $history | ForEach-Object { try { $_ | ConvertFrom-Json } catch {} })
+                $status = $records | Where-Object { $_.event_type -eq "native_relay.status" -and $_.data.native_record.state -in @("running", "degraded") } | Select-Object -First 1
+                if ($status) { $ready = $true; break }
+              }
+              Start-Sleep -Milliseconds 200
+            }
+            if (-not $ready) { throw "NativeRelay did not report running/degraded status. $((Get-Content $stderr -Raw -ErrorAction SilentlyContinue))" }
+
+            Set-Content -Path $activity -Value "created"
+            Start-Sleep -Milliseconds 350
+            Set-Content -Path $activity -Value "modified"
+
+            # Toolhelp fallback polls every 200ms; keep this child alive long enough to observe.
+            $probe = Start-Process -FilePath "$env:WINDIR\System32\ping.exe" -ArgumentList @("127.0.0.1", "-n", "5") -PassThru
+            $targetProcessId = $probe.Id
+            $probe.WaitForExit()
+
+            $verified = $false
+            for ($i = 0; $i -lt 100; $i++) {
+              if (Test-Path $history) {
+                $records = @(Get-Content $history | ForEach-Object { try { $_ | ConvertFrom-Json } catch {} })
+                $observations = @($records | Where-Object { $_.event_type -eq "native_relay.observation" } | ForEach-Object { $_.data.native_record })
+                $created = $observations | Where-Object { $_.type -eq "file.created" -and $_.resource.path -like "*nativerelay-integration-activity-*" }
+                $modified = $observations | Where-Object { $_.type -eq "file.modified" -and $_.resource.path -like "*nativerelay-integration-activity-*" }
+                $started = $observations | Where-Object { $_.type -eq "process.started" -and $_.process.pid -eq $targetProcessId }
+                $exited = $observations | Where-Object { $_.type -eq "process.exited" -and $_.process.pid -eq $targetProcessId }
+                if ($created -and $modified -and $started -and $exited) { $verified = $true; break }
+              }
+              Start-Sleep -Milliseconds 200
+            }
+            if (-not $verified) {
+              Get-Content $stdout, $stderr, $history -ErrorAction SilentlyContinue | Write-Host
+              throw "Expected file.created/file.modified and process.started/process.exited observations were not all received."
+            }
+            Write-Host "Verified NativeRelay Windows file and process observations (PID $targetProcessId)."
+          }
+          finally {
+            if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
+            Remove-Item $activity -Force -ErrorAction SilentlyContinue
+            Remove-Item $testDir -Recurse -Force -ErrorAction SilentlyContinue
+          }

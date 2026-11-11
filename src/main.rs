@@ -92,6 +92,8 @@ fn main() {
         Some("watch") => watch_agents(&arguments[1..]).map(|()| 0),
         Some("history") => print_history(&arguments[1..]).map(|()| 0),
         Some("trace") => trace_command(&arguments[1..]),
+        Some("status") => status_command(&arguments[1..]).map(|()| 0),
+        Some("doctor") => doctor_command(&arguments[1..]).map(|()| 0),
         Some(command) => {
             eprintln!("Unknown command: {command}");
             print_help();
@@ -242,6 +244,10 @@ struct WatchOptions {
     include_command_args: bool,
     format: WatchOutputFormat,
     native_relay: bool,
+    native_relay_scope: Option<PathBuf>,
+    native_relay_include_command: bool,
+    native_relay_include_paths: Vec<String>,
+    native_relay_exclude_paths: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1045,12 +1051,36 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
             )
         })?;
     let mut history = BufWriter::new(file);
+    let native_relay_scope = options
+        .native_relay_scope
+        .clone()
+        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let mut native_relay = if options.native_relay {
-        Some(nativerelay::Process::spawn()?)
+        Some(nativerelay::Process::spawn_with_options(
+            &native_relay_scope,
+            options.native_relay_include_command,
+            &options.native_relay_include_paths,
+            &options.native_relay_exclude_paths,
+        )?)
     } else {
         None
     };
     let native_relay_pid = native_relay.as_ref().map(nativerelay::Process::id);
+
+    // Display NativeRelay version info when enabled
+    if options.native_relay {
+        if let Some(_adapter) = native_relay.as_ref() {
+            let exe_path = nativerelay::find_executable();
+            if let Some(path) = exe_path {
+                if let Some(version) = nativerelay::get_version(&path) {
+                    eprintln!("🔗 NativeRelay collector: {} (v{})", path.display(), version);
+                } else {
+                    eprintln!("🔗 NativeRelay collector: {}", path.display());
+                }
+            }
+        }
+    }
+
     let running = Arc::new(AtomicBool::new(true));
     let signal_state = Arc::clone(&running);
     ctrlc::set_handler(move || signal_state.store(false, Ordering::SeqCst))
@@ -1072,7 +1102,31 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
         json!({
             "collector": "sysinfo_polling",
             "history_file": options.output,
-            "native_relay": { "enabled": options.native_relay, "child_pid": native_relay_pid, "command": if options.native_relay { Some("nativerelay run --format json") } else { None } },
+            "native_relay": {
+                "enabled": options.native_relay,
+                "child_pid": native_relay_pid,
+                "command": if options.native_relay {
+                    let mut cmd = vec!["nativerelay".to_string(), "run".to_string(), "--format".to_string(), "json".to_string(), "--scope".to_string(), native_relay_scope.display().to_string()];
+                    if options.native_relay_include_command {
+                        cmd.push("--include-command".to_string());
+                    }
+                    for pattern in &options.native_relay_include_paths {
+                        cmd.push("--include-paths".to_string());
+                        cmd.push(pattern.clone());
+                    }
+                    for pattern in &options.native_relay_exclude_paths {
+                        cmd.push("--exclude-paths".to_string());
+                        cmd.push(pattern.clone());
+                    }
+                    Some(cmd.join(" "))
+                } else {
+                    None
+                },
+                "scope": native_relay_scope.display().to_string(),
+                "include_command": options.native_relay_include_command,
+                "include_paths": options.native_relay_include_paths,
+                "exclude_paths": options.native_relay_exclude_paths,
+            },
             "poll_interval_ms": options.interval.as_millis(),
             "duration_ms": options.duration.map(|duration| duration.as_millis()),
             "command_args_recorded": options.include_command_args,
@@ -1082,7 +1136,7 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
                 "stdin": false,
                 "stdout": false,
                 "stderr": false,
-                "file_events": if options.native_relay { "native_relay_best_effort_linux_scoped" } else { "disabled" },
+                "file_events": if options.native_relay { "native_relay_best_effort_platform_scoped" } else { "disabled" },
                 "native_relay": options.native_relay,
                 "native_relay_loss_reporting": options.native_relay
             }
@@ -1113,6 +1167,10 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
     let mut native_exit: Option<std::process::ExitStatus> = None;
     let mut native_error: Option<String> = None;
     let mut native_sequences = HashMap::new();
+    let mut native_relay_capabilities = Vec::new();
+    let mut native_relay_health = None;
+    let mut native_relay_losses = Vec::new();
+    let mut native_relay_status = None;
     loop {
         if !running.load(Ordering::SeqCst) {
             break;
@@ -1130,6 +1188,10 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
                 &mut native_stdout_eof,
                 &mut native_stderr_eof,
                 &mut native_sequences,
+                &mut native_relay_capabilities,
+                &mut native_relay_health,
+                &mut native_relay_losses,
+                &mut native_relay_status,
             )?;
         }
         if let Some(adapter) = native_relay.as_mut() {
@@ -1212,6 +1274,10 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
                     &mut native_stdout_eof,
                     &mut native_stderr_eof,
                     &mut native_sequences,
+                    &mut native_relay_capabilities,
+                    &mut native_relay_health,
+                    &mut native_relay_losses,
+                    &mut native_relay_status,
                 )?;
             }
             if let Some(adapter) = native_relay.as_mut() {
@@ -1264,6 +1330,10 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
                     &mut native_stdout_eof,
                     &mut native_stderr_eof,
                     &mut native_sequences,
+                    &mut native_relay_capabilities,
+                    &mut native_relay_health,
+                    &mut native_relay_losses,
+                    &mut native_relay_status,
                 )?;
             }
         }
@@ -1272,13 +1342,34 @@ fn watch_agents(arguments: &[String]) -> Result<(), String> {
         }
     }
 
+    // Determine NativeRelay collection state for summary
+    let native_relay_collection_state = if native_relay_losses.is_empty() {
+        "no_loss_reported"
+    } else {
+        "loss_reported"
+    };
+
     write_event(
         &mut history,
         &mut stdout,
         &session_id,
         &mut sequence,
         "session_stopped",
-        json!({ "reason": stop_reason, "native_relay_enabled": options.native_relay, "native_relay_exit_code": native_exit.as_ref().and_then(std::process::ExitStatus::code), "native_relay_error": native_error, "observations_lost_or_incomplete": native_incomplete, "trace_complete": !native_incomplete }),
+        json!({
+            "reason": stop_reason,
+            "native_relay_enabled": options.native_relay,
+            "native_relay_exit_code": native_exit.as_ref().and_then(std::process::ExitStatus::code),
+            "native_relay_error": native_error,
+            "observations_lost_or_incomplete": native_incomplete,
+            "trace_complete": !native_incomplete,
+            "native_relay": {
+                "capabilities": native_relay_capabilities,
+                "health": native_relay_health,
+                "losses": native_relay_losses,
+                "final_status": native_relay_status,
+                "collection_state": native_relay_collection_state,
+            }
+        }),
         options.format,
         color,
         true,
@@ -1309,6 +1400,10 @@ fn consume_native_messages(
     stdout_eof: &mut bool,
     stderr_eof: &mut bool,
     previous_sequences: &mut HashMap<String, u64>,
+    native_relay_capabilities: &mut Vec<Value>,
+    native_relay_health: &mut Option<Value>,
+    native_relay_losses: &mut Vec<Value>,
+    native_relay_status: &mut Option<Value>,
 ) -> Result<(), String> {
     while let Some(message) = adapter.try_message() {
         consume_native_message(
@@ -1323,6 +1418,10 @@ fn consume_native_messages(
             stdout_eof,
             stderr_eof,
             previous_sequences,
+            native_relay_capabilities,
+            native_relay_health,
+            native_relay_losses,
+            native_relay_status,
         )?;
     }
     Ok(())
@@ -1340,6 +1439,10 @@ fn consume_native_message(
     stdout_eof: &mut bool,
     stderr_eof: &mut bool,
     previous_sequences: &mut HashMap<String, u64>,
+    native_relay_capabilities: &mut Vec<Value>,
+    native_relay_health: &mut Option<Value>,
+    native_relay_losses: &mut Vec<Value>,
+    native_relay_status: &mut Option<Value>,
 ) -> Result<(), String> {
     match message {
         nativerelay::Message::Record(record) => {
@@ -1348,9 +1451,17 @@ fn consume_native_message(
             let event_type = match record_type {
                 Some("nativerelay.loss") => {
                     *incomplete = true;
+                    native_relay_losses.push(record.clone());
                     "native_relay.loss"
                 }
                 Some("nativerelay.status") => {
+                    if let Some(capabilities) = record.get("capabilities") {
+                        *native_relay_capabilities = capabilities.as_array().cloned().unwrap_or_default();
+                    }
+                    if let Some(health) = record.get("health") {
+                        *native_relay_health = Some(health.clone());
+                    }
+                    *native_relay_status = Some(record.clone());
                     if !matches!(record["state"].as_str(), Some("running" | "stopped")) {
                         *incomplete = true;
                     }
@@ -1378,13 +1489,26 @@ fn consume_native_message(
                     }
                     if let Some(source) = record["collector"].as_str() {
                         if let Some(current) = record["sequence"].as_u64() {
-                            if let Some(previous) =
-                                previous_sequences.insert(source.to_string(), current)
-                            {
+                            if let Some(previous) = previous_sequences.insert(source.to_string(), current) {
                                 if current != previous.saturating_add(1) {
                                     *incomplete = true;
-                                    write_event(history, stdout, session_id, sequence, "native_relay.sequence_gap", json!({ "source_collector": source, "previous_sequence": previous, "observed_sequence": current, "native_record": record }), format, color, true)
-                                        .map_err(|error| format!("cannot write NativeRelay sequence gap: {error}"))?;
+                                    write_event(
+                                        history,
+                                        stdout,
+                                        session_id,
+                                        sequence,
+                                        "native_relay.sequence_gap",
+                                        json!({
+                                            "source_collector": source,
+                                            "previous_sequence": previous,
+                                            "observed_sequence": current,
+                                            "native_record": record
+                                        }),
+                                        format,
+                                        color,
+                                        true,
+                                    )
+                                    .map_err(|error| format!("cannot write NativeRelay sequence gap: {error}"))?;
                                 }
                             }
                         }
@@ -1400,13 +1524,15 @@ fn consume_native_message(
                     "native_relay.unsupported_record"
                 }
             };
+            // For all records, wrap in native_record for backward compatibility with existing tests
+            let payload = json!({ "native_record": record });
             write_event(
                 history,
                 stdout,
                 session_id,
                 sequence,
                 event_type,
-                json!({ "native_record": record }),
+                payload,
                 format,
                 color,
                 true,
@@ -1421,7 +1547,7 @@ fn consume_native_message(
                 stdout,
                 session_id,
                 sequence,
-                "native_relay.malformed_record",
+                "native_relay_malformed_record",
                 json!({ "line": line, "error": error, "raw": raw }),
                 format,
                 color,
@@ -1444,7 +1570,7 @@ fn consume_native_message(
                 stdout,
                 session_id,
                 sequence,
-                "native_relay.read_error",
+                "native_relay_read_error",
                 json!({ "error": error }),
                 format,
                 color,
@@ -1463,6 +1589,10 @@ fn parse_watch_options(arguments: &[String]) -> Result<WatchOptions, String> {
     let mut include_command_args = false;
     let mut format = WatchOutputFormat::Pretty;
     let mut native_relay = false;
+    let mut native_relay_scope = None;
+    let mut native_relay_include_command = false;
+    let mut native_relay_include_paths = Vec::new();
+    let mut native_relay_exclude_paths = Vec::new();
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].as_str() {
@@ -1501,6 +1631,22 @@ fn parse_watch_options(arguments: &[String]) -> Result<WatchOptions, String> {
             }
             "--include-command-args" => include_command_args = true,
             "--native-relay" => native_relay = true,
+            "--native-relay-scope" => {
+                index += 1;
+                let value = arguments.get(index).ok_or("--native-relay-scope requires a path")?;
+                native_relay_scope = Some(PathBuf::from(value));
+            }
+            "--native-relay-include-command" => native_relay_include_command = true,
+            "--native-relay-include-paths" => {
+                index += 1;
+                let value = arguments.get(index).ok_or("--native-relay-include-paths requires a pattern")?;
+                native_relay_include_paths.push(value.to_string());
+            }
+            "--native-relay-exclude-paths" => {
+                index += 1;
+                let value = arguments.get(index).ok_or("--native-relay-exclude-paths requires a pattern")?;
+                native_relay_exclude_paths.push(value.to_string());
+            }
             "--json" => format = WatchOutputFormat::Json,
             "--pretty-json" => format = WatchOutputFormat::PrettyJson,
             "--format" => {
@@ -1532,6 +1678,10 @@ fn parse_watch_options(arguments: &[String]) -> Result<WatchOptions, String> {
         include_command_args,
         format,
         native_relay,
+        native_relay_scope,
+        native_relay_include_command,
+        native_relay_include_paths,
+        native_relay_exclude_paths,
     })
 }
 
@@ -2563,6 +2713,222 @@ fn instance_key(pid: &str, start_time: u64) -> String {
     format!("{pid}:{start_time}")
 }
 
+fn status_command(arguments: &[String]) -> Result<(), String> {
+    let mut show_native_relay = false;
+    let mut json_output = false;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--native-relay" => show_native_relay = true,
+            "--json" => json_output = true,
+            option => return Err(format!("unknown status option: {option}")),
+        }
+        index += 1;
+    }
+
+    if !show_native_relay {
+        return Err("status requires --native-relay flag".to_string());
+    }
+
+    let info = nativerelay::discover_nativerelay();
+
+    if json_output {
+        let output = serde_json::json!({
+            "native_relay": {
+                "executable_path": info.executable_path.map(|p| p.display().to_string()),
+                "version": info.version.as_ref().map(|v| v.version.clone()),
+                "compatibility": format!("{:?}", info.compatibility),
+                "platform_support": format!("{:?}", info.platform_support),
+                "can_start": info.can_start,
+                "start_error": info.start_error,
+                "version_range": format!("{} ≤ version < {}", nativerelay::MIN_NATIVERELAY_VERSION, nativerelay::MAX_NATIVERELAY_VERSION),
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        return Ok(());
+    }
+
+    // Human-readable output
+    println!("AgentTrace NativeRelay Status");
+    println!("=============================");
+    println!();
+
+    if let Some(path) = &info.executable_path {
+        println!("Executable: {}", path.display());
+    } else {
+        println!("Executable: not found");
+    }
+
+    if let Some(version) = &info.version {
+        println!("Version: {}", version.version);
+    } else {
+        println!("Version: unknown");
+    }
+
+    println!("Compatibility: {:?}", info.compatibility);
+    println!("Platform Support: {:?}", info.platform_support);
+    println!("Can Start: {}", if info.can_start { "yes" } else { "no" });
+
+    if let Some(error) = &info.start_error {
+        println!("Start Error: {}", error);
+    }
+
+    println!();
+    println!("Compatibility Range: {} ≤ version < {}", 
+        nativerelay::MIN_NATIVERELAY_VERSION, 
+        nativerelay::MAX_NATIVERELAY_VERSION);
+
+    // Exit with appropriate code
+    match info.compatibility {
+        nativerelay::CompatibilityStatus::Compatible => {}
+        nativerelay::CompatibilityStatus::TooOld => std::process::exit(1),
+        nativerelay::CompatibilityStatus::TooNew => std::process::exit(2),
+        nativerelay::CompatibilityStatus::Unavailable => std::process::exit(3),
+    }
+
+    Ok(())
+}
+
+fn doctor_command(arguments: &[String]) -> Result<(), String> {
+    let mut json_output = false;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "--json" => json_output = true,
+            option => return Err(format!("unknown doctor option: {option}")),
+        }
+        index += 1;
+    }
+
+    let info = nativerelay::discover_nativerelay();
+    let mut issues = Vec::<String>::new();
+    let mut warnings = Vec::<String>::new();
+
+    // Check executable
+    if info.executable_path.is_none() {
+        issues.push("NativeRelay executable not found in PATH".to_string());
+    }
+
+    // Check version
+    if let Some(version) = &info.version {
+        match info.compatibility {
+            nativerelay::CompatibilityStatus::Compatible => {}
+            nativerelay::CompatibilityStatus::TooOld => {
+                issues.push(format!("NativeRelay version {} is too old (minimum: {})", 
+                    version.version, nativerelay::MIN_NATIVERELAY_VERSION));
+            }
+            nativerelay::CompatibilityStatus::TooNew => {
+                warnings.push(format!("NativeRelay version {} is newer than tested range (max: {})", 
+                    version.version, nativerelay::MAX_NATIVERELAY_VERSION));
+            }
+            nativerelay::CompatibilityStatus::Unavailable => {
+                issues.push("Could not determine NativeRelay version".to_string());
+            }
+        }
+    } else if info.executable_path.is_some() {
+        warnings.push("NativeRelay found but version could not be determined".to_string());
+    }
+
+    // Check platform support
+    match info.platform_support {
+        nativerelay::PlatformSupport::Full => {}
+        nativerelay::PlatformSupport::Degraded => {
+            warnings.push("Platform support is degraded (Linux: requires root or CAP_NET_ADMIN + CAP_SYS_ADMIN for full support)".to_string());
+        }
+        nativerelay::PlatformSupport::Unavailable => {
+            issues.push("NativeRelay collector is not available on this platform (Linux only)".to_string());
+        }
+    }
+
+    // Check if can start
+    if !info.can_start {
+        if let Some(error) = &info.start_error {
+            issues.push(format!("NativeRelay cannot start: {}", error));
+        } else {
+            issues.push("NativeRelay cannot start (unknown reason)".to_string());
+        }
+    }
+
+    if json_output {
+        let output = serde_json::json!({
+            "native_relay": {
+                "executable_path": info.executable_path.map(|p| p.display().to_string()),
+                "version": info.version.as_ref().map(|v| v.version.clone()),
+                "compatibility": format!("{:?}", info.compatibility),
+                "platform_support": format!("{:?}", info.platform_support),
+                "can_start": info.can_start,
+                "start_error": info.start_error,
+                "version_range": format!("{} ≤ version < {}", nativerelay::MIN_NATIVERELAY_VERSION, nativerelay::MAX_NATIVERELAY_VERSION),
+            },
+            "diagnostics": {
+                "issues": issues,
+                "warnings": warnings,
+                "healthy": issues.is_empty(),
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+        
+        if !issues.is_empty() {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    // Human-readable output
+    println!("AgentTrace Doctor — NativeRelay Diagnostics");
+    println!("==========================================");
+    println!();
+
+    println!("Executable: {}", 
+        info.executable_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "NOT FOUND".to_string()));
+    
+    if let Some(version) = &info.version {
+        println!("Version: {}", version.version);
+    } else {
+        println!("Version: unknown");
+    }
+
+    println!("Platform Support: {:?}", info.platform_support);
+    println!("Can Start: {}", if info.can_start { "yes" } else { "no" });
+    println!();
+
+    if !issues.is_empty() {
+        println!("{}", paint("ISSUES:", "31", true));
+        for issue in &issues {
+            println!("  ✗ {}", issue);
+        }
+        println!();
+    }
+
+    if !warnings.is_empty() {
+        println!("{}", paint("WARNINGS:", "33", true));
+        for warning in &warnings {
+            println!("  ⚠ {}", warning);
+        }
+        println!();
+    }
+
+    if issues.is_empty() && warnings.is_empty() {
+        println!("{}", paint("All checks passed. NativeRelay is ready to use.", "32", true));
+    } else if issues.is_empty() {
+        println!("{}", paint("No critical issues. NativeRelay should work with warnings noted above.", "32", true));
+    }
+
+    println!();
+    println!("Compatibility Range: {} ≤ version < {}", 
+        nativerelay::MIN_NATIVERELAY_VERSION, 
+        nativerelay::MAX_NATIVERELAY_VERSION);
+    println!("Installation: pip install nativerelay=={}", nativerelay::MIN_NATIVERELAY_VERSION);
+    println!("Repository: https://github.com/VeloraTech/NativeRelay");
+    println!("PyPI: https://pypi.org/project/nativerelay/");
+
+    if !issues.is_empty() {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
 fn print_help() {
     println!(
         "TRACE USAGE: agenttrace trace [--check] [--output PATH] [--cwd PATH] [--include-command-args] [--capture-streams] -- PROGRAM [ARGS...]"
@@ -2571,7 +2937,7 @@ fn print_help() {
         "TRACE OPTIONS: --check (record command lifecycle); --output PATH; --cwd PATH; --include-command-args (sensitive); --capture-streams (up to 10 MiB per stream, sensitive); --watch-files (workspace metadata changes)\n"
     );
     println!(
-        "WATCH ALIAS: `agenttrace run --watch [WATCH OPTIONS]` is equivalent to `agenttrace watch [WATCH OPTIONS]`. Add `--native-relay` to start NativeRelay 0.2.0.\n"
+        "WATCH ALIAS: `agenttrace run --watch [WATCH OPTIONS]` is equivalent to `agenttrace watch [WATCH OPTIONS]`. Add `--native-relay` to start NativeRelay (requires nativerelay installed).\n"
     );
     println!(
         "WATCH OUTPUT: defaults to readable events; use `--json` for compact JSONL or `--pretty-json` for indented JSON records. Color is disabled in JSON modes and by `NO_COLOR`.\n"
@@ -2581,7 +2947,7 @@ fn print_help() {
     );
     println!("AgentTrace — discover running AI coding-agent processes\n");
     println!(
-        "USAGE:\n    agenttrace [run]\n    agenttrace watch [--output PATH] [--interval-ms MS] [--duration-ms MS] [--include-command-args]\n    agenttrace history [--file PATH]\n\nCOMMANDS:\n    run       Take a one-time process snapshot (default)\n    watch     Stream process lifecycle events and append JSONL history\n    history   Print recorded JSONL history\n\nWATCH OPTIONS:\n    --output PATH            History file (default: .agenttrace/history.jsonl)\n    --interval-ms MS         Poll interval, at least 100 ms (default: 1000)\n    --duration-ms MS         Stop after a bounded recording session\n    --include-command-args   Persist raw command arguments; may expose secrets\n\nOPTIONS:\n    -h, --help    Print this help message"
+        "USAGE:\n    agenttrace [run]\n    agenttrace watch [--output PATH] [--interval-ms MS] [--duration-ms MS] [--include-command-args] [--native-relay] [--native-relay-scope PATH] [--native-relay-include-command] [--native-relay-include-paths PATTERN] [--native-relay-exclude-paths PATTERN]\n    agenttrace history [--file PATH] [--json] [--pretty-json]\n    agenttrace status --native-relay [--json]\n    agenttrace doctor [--json]\n\nCOMMANDS:\n    run       Take a one-time process snapshot (default)\n    watch     Stream process lifecycle events and append JSONL history\n    history   Print recorded JSONL history\n    status    Show NativeRelay collector status and capabilities\n    doctor    Diagnose NativeRelay installation, compatibility, and platform support\n\nWATCH OPTIONS:\n    --output PATH                     History file (default: .agenttrace/history.jsonl)\n    --interval-ms MS                  Poll interval, at least 100 ms (default: 1000)\n    --duration-ms MS                  Stop after a bounded recording session\n    --include-command-args            Persist raw command arguments; may expose secrets\n    --native-relay                    Enable NativeRelay Linux kernel telemetry (requires nativerelay installed)\n    --native-relay-scope PATH         Directory scope for NativeRelay file events (default: current directory)\n    --native-relay-include-command    Include argv in NativeRelay process events (may expose secrets)\n    --native-relay-include-paths PATTERN  fnmatch pattern for NativeRelay file paths to include (repeatable)\n    --native-relay-exclude-paths PATTERN  fnmatch pattern for NativeRelay file paths to exclude (repeatable)\n\nSTATUS OPTIONS:\n    --native-relay                    Show NativeRelay collector status (required)\n    --json                            Output as JSON\n\nDOCTOR OPTIONS:\n    --json                            Output diagnostics as JSON\n\nOPTIONS:\n    -h, --help    Print this help message"
     );
 }
 
@@ -2715,12 +3081,21 @@ mod tests {
             .unwrap();
         let child_pid = child.id().to_string();
         let root_pid = std::process::id().to_string();
-        thread::sleep(Duration::from_millis(200));
-        let mut system = System::new_all();
-        system.refresh_all();
-        let child_record = snapshot_processes(&system, false)
-            .into_iter()
-            .find(|process| process.pid == child_pid);
+
+        // Retry with increasing backoff to handle slow CI systems
+        let mut child_record = None;
+        for attempt in 0..10 {
+            thread::sleep(Duration::from_millis(200 + attempt * 100));
+            let mut system = System::new_all();
+            system.refresh_all();
+            child_record = snapshot_processes(&system, false)
+                .into_iter()
+                .find(|process| process.pid == child_pid);
+            if child_record.is_some() {
+                break;
+            }
+        }
+
         let _ = child.kill();
         let _ = child.wait();
 
@@ -3082,6 +3457,45 @@ mod tests {
         assert!(parse_watch_options(forwarded).unwrap().native_relay);
         assert!(run_watch_options(&[]).unwrap().is_none());
         assert!(run_watch_options(&["--unknown".to_string()]).is_err());
+
+        // Test native relay scope option
+        let opts = parse_watch_options(&[
+            "--native-relay".to_string(),
+            "--native-relay-scope".to_string(),
+            "/custom/path".to_string(),
+        ]).unwrap();
+        assert!(opts.native_relay);
+        assert_eq!(opts.native_relay_scope, Some(PathBuf::from("/custom/path")));
+
+        // Test native relay include command
+        let opts = parse_watch_options(&[
+            "--native-relay".to_string(),
+            "--native-relay-include-command".to_string(),
+        ]).unwrap();
+        assert!(opts.native_relay);
+        assert!(opts.native_relay_include_command);
+
+        // Test native relay include paths
+        let opts = parse_watch_options(&[
+            "--native-relay".to_string(),
+            "--native-relay-include-paths".to_string(),
+            "*.rs".to_string(),
+            "--native-relay-include-paths".to_string(),
+            "*.toml".to_string(),
+        ]).unwrap();
+        assert!(opts.native_relay);
+        assert_eq!(opts.native_relay_include_paths, vec!["*.rs".to_string(), "*.toml".to_string()]);
+
+        // Test native relay exclude paths
+        let opts = parse_watch_options(&[
+            "--native-relay".to_string(),
+            "--native-relay-exclude-paths".to_string(),
+            "target/*".to_string(),
+            "--native-relay-exclude-paths".to_string(),
+            ".git/*".to_string(),
+        ]).unwrap();
+        assert!(opts.native_relay);
+        assert_eq!(opts.native_relay_exclude_paths, vec!["target/*".to_string(), ".git/*".to_string()]);
     }
 
     #[test]
@@ -3312,6 +3726,10 @@ mod tests {
         let mut eof = false;
         let mut stderr_eof = false;
         let mut source_sequences = HashMap::new();
+        let mut native_relay_capabilities = Vec::new();
+        let mut native_relay_health = None;
+        let mut native_relay_losses = Vec::new();
+        let mut native_relay_status = None;
         for native_sequence in [12, 14] {
             let record = json!({"schema_version":1,"id":format!("evt-{native_sequence}"),"timestamp":"2026-10-07T12:00:00Z","type":"file.opened","platform":"linux","collector":"fanotify","sequence":native_sequence,"process":{"pid":42},"resource":{"type":"file","path":"/tmp/secret.txt"},"metadata":{"flag":"kept"},"evidence":"observed"});
             consume_native_message(
@@ -3326,6 +3744,10 @@ mod tests {
                 &mut eof,
                 &mut stderr_eof,
                 &mut source_sequences,
+                &mut native_relay_capabilities,
+                &mut native_relay_health,
+                &mut native_relay_losses,
+                &mut native_relay_status,
             )
             .unwrap();
         }
@@ -3363,6 +3785,10 @@ mod tests {
         let mut eof = false;
         let mut stderr_eof = false;
         let mut source_sequences = HashMap::new();
+        let mut native_relay_capabilities = Vec::new();
+        let mut native_relay_health = None;
+        let mut native_relay_losses = Vec::new();
+        let mut native_relay_status = None;
         let record = nativerelay::parse_record(r#"{"schema_version":1,"record_type":"nativerelay.loss","timestamp":"2026-10-07T12:00:00Z","loss_generation":3,"losses":{"fanotify":{"overflow":{"known_dropped":0,"unknown_count":true}}}}"#).unwrap();
         consume_native_message(
             nativerelay::Message::Record(record),
@@ -3376,6 +3802,10 @@ mod tests {
             &mut eof,
             &mut stderr_eof,
             &mut source_sequences,
+            &mut native_relay_capabilities,
+            &mut native_relay_health,
+            &mut native_relay_losses,
+            &mut native_relay_status,
         )
         .unwrap();
         let event: Value =
@@ -3383,5 +3813,67 @@ mod tests {
         assert_eq!(event["event_type"], "native_relay.loss");
         assert_eq!(event["data"]["native_record"]["loss_generation"], 3);
         assert!(incomplete);
+        // Verify loss was tracked
+        assert_eq!(native_relay_losses.len(), 1);
+    }
+
+    #[test]
+    fn native_relay_status_record_stores_capabilities_and_health() {
+        let mut history = Vec::new();
+        let mut stdout = Vec::new();
+        let mut seq = 0;
+        let mut incomplete = false;
+        let mut eof = false;
+        let mut stderr_eof = false;
+        let mut source_sequences = HashMap::new();
+        let mut native_relay_capabilities = Vec::new();
+        let mut native_relay_health = None;
+        let mut native_relay_losses = Vec::new();
+        let mut native_relay_status = None;
+        let record = nativerelay::parse_record(r#"{"schema_version":1,"record_type":"nativerelay.status","timestamp":"2026-10-07T12:00:00Z","state":"running","capabilities":[{"event_type":"process.started","status":"available","reason":"","scope":"/tmp"},{"event_type":"file.opened","status":"degraded","reason":"permission_denied","scope":"/tmp"}],"health":{"dropped":0,"losses":{}}}"#).unwrap();
+        consume_native_message(
+            nativerelay::Message::Record(record),
+            &mut history,
+            &mut stdout,
+            "session",
+            &mut seq,
+            WatchOutputFormat::Json,
+            false,
+            &mut incomplete,
+            &mut eof,
+            &mut stderr_eof,
+            &mut source_sequences,
+            &mut native_relay_capabilities,
+            &mut native_relay_health,
+            &mut native_relay_losses,
+            &mut native_relay_status,
+        )
+        .unwrap();
+        let event: Value =
+            serde_json::from_slice(history.split(|byte| *byte == b'\n').next().unwrap()).unwrap();
+        assert_eq!(event["event_type"], "native_relay.status");
+        // Verify capabilities and health were stored
+        assert_eq!(native_relay_capabilities.len(), 2);
+        assert!(native_relay_health.is_some());
+        assert!(native_relay_status.is_some());
+        assert_eq!(native_relay_status.unwrap()["state"], "running");
+    }
+
+    #[test]
+    fn status_command_requires_native_relay_flag() {
+        let err = status_command(&[]).unwrap_err();
+        assert!(err.contains("status requires --native-relay flag"));
+    }
+
+    #[test]
+    fn status_command_unknown_option() {
+        let err = status_command(&["--unknown".to_string()]).unwrap_err();
+        assert!(err.contains("unknown status option"));
+    }
+
+    #[test]
+    fn doctor_command_unknown_option() {
+        let err = doctor_command(&["--unknown".to_string()]).unwrap_err();
+        assert!(err.contains("unknown doctor option"));
     }
 }
