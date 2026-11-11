@@ -975,6 +975,7 @@ mod tests {
         let beta = NativeRelayVersion::parse("0.4.0b1").unwrap();
         let release = NativeRelayVersion::parse("0.4.0").unwrap();
         assert!(beta < release);
+        assert!(release.is_compatible());
         assert!(beta.is_compatible());
     }
 
@@ -1124,7 +1125,7 @@ mod tests {
         assert_eq!(v_old.compatibility_status(), CompatibilityStatus::TooOld);
 
         // Test too new version
-        let v_new = NativeRelayVersion::parse("0.4.0").unwrap();
+        let v_new = NativeRelayVersion::parse("0.5.0").unwrap();
         assert!(!v_new.is_compatible());
         assert_eq!(v_new.compatibility_status(), CompatibilityStatus::TooNew);
 
@@ -1136,7 +1137,7 @@ mod tests {
 
         let err_new = version_error(&v_new, CompatibilityStatus::TooNew);
         assert!(err_new.contains("newer than the tested"));
-        assert!(err_new.contains("0.4.0"));
+        assert!(err_new.contains("0.5.0"));
     }
 
     #[test]
