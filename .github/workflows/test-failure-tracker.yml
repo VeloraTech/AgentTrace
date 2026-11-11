@@ -19,6 +19,7 @@ jobs:
       - name: Download workflow logs
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RUN_ID: ${{ github.event.workflow_run.id }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: |
