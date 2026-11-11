@@ -14,7 +14,7 @@ const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(2);
 /// Minimum compatible NativeRelay version
 pub const MIN_NATIVERELAY_VERSION: &str = "0.3.0";
 /// Maximum tested NativeRelay version (exclusive upper bound for semver compatibility)
-pub const MAX_NATIVERELAY_VERSION: &str = "0.4.0";
+pub const MAX_NATIVERELAY_VERSION: &str = "0.5.0";
 
 /// Parsed NativeRelay version information
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -995,7 +995,7 @@ mod tests {
         assert!(!v_old.is_compatible());
         assert_eq!(v_old.compatibility_status(), CompatibilityStatus::TooOld);
 
-        let v_new = NativeRelayVersion::parse("0.4.0").unwrap();
+        let v_new = NativeRelayVersion::parse("0.5.0").unwrap();
         assert!(!v_new.is_compatible());
         assert_eq!(v_new.compatibility_status(), CompatibilityStatus::TooNew);
 
@@ -1059,10 +1059,10 @@ mod tests {
         assert!(err.contains("0.3.0"));
         assert!(err.contains("pip install --upgrade"));
 
-        let v_new = NativeRelayVersion::parse("0.4.0").unwrap();
+        let v_new = NativeRelayVersion::parse("0.5.0").unwrap();
         let err = version_error(&v_new, CompatibilityStatus::TooNew);
         assert!(err.contains("newer than the tested"));
-        assert!(err.contains("0.4.0"));
+        assert!(err.contains("0.5.0"));
         assert!(err.contains(MIN_NATIVERELAY_VERSION));
 
         let v_compat = NativeRelayVersion::parse("0.3.2").unwrap();
@@ -1073,7 +1073,7 @@ mod tests {
     #[test]
     fn missing_error_contains_version_range() {
         let err = missing_error();
-        assert!(err.contains("0.3.0 ≤ version < 0.4.0"));
+        assert!(err.contains("0.3.0 ≤ version < 0.5.0"));
         assert!(err.contains(MIN_NATIVERELAY_VERSION));
     }
 
@@ -1113,6 +1113,10 @@ mod tests {
         let v_compat = NativeRelayVersion::parse("0.3.2").unwrap();
         assert!(v_compat.is_compatible());
         assert_eq!(v_compat.compatibility_status(), CompatibilityStatus::Compatible);
+
+        let v_040 = NativeRelayVersion::parse("0.4.0").unwrap();
+        assert!(v_040.is_compatible());
+        assert_eq!(v_040.compatibility_status(), CompatibilityStatus::Compatible);
 
         // Test too old version
         let v_old = NativeRelayVersion::parse("0.2.0").unwrap();
