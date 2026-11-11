@@ -77,12 +77,11 @@ agenttrace doctor                  # Diagnose installation and compatibility
 
 ### NativeRelay Capabilities
 
-| Event Type | Linux Status | Requirements | Notes |
-|------------|--------------|--------------|-------|
-| `process.started`, `process.exited` | Best effort | root or `CAP_NET_ADMIN` (CN_PROC) | Short-lived processes may be missed. Netlink overrun reported as loss. |
-| `file.opened` | Best effort | `CAP_SYS_ADMIN` (fanotify) | Scoped to `--scope` directory. Path filtering via `--include-paths`/`--exclude-paths`. |
-| `file.created`, `file.deleted`, `file.renamed` | Best effort | `CAP_SYS_ADMIN` (fanotify) | Fanotify FAN_CREATE/FAN_DELETE/FAN_MOVE. PID attribution via FAN_REPORT_PID. |
-| `file.modified` | Best effort | `CAP_SYS_ADMIN` (fanotify) | Modification notification only; no byte-level detail. |
+| Event Type | Linux | Windows 0.4.x | Notes |
+|------------|-------|--------------|-------|
+| `process.started`, `process.exited` | CN_PROC (best effort) | WMI when available; Toolhelp polling fallback | Polling may miss short-lived processes. |
+| `file.opened` | fanotify (best effort) | Unsupported | Windows collector does not report file opens. |
+| `file.created`, `file.modified`, `file.deleted`, `file.renamed` | fanotify (best effort) | Scoped filesystem notifications | Windows file events are not attributed to the process that caused them. |
 
 ### Loss Reporting
 
