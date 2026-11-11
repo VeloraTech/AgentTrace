@@ -35,23 +35,23 @@ For process discovery, command arguments are inspected in memory for detection b
 
 - Rust stable and Cargo
 - On Windows, the Rust MSVC toolchain and its Visual Studio C++ build tools
-- **Optional live native observations**: NativeRelay (`pip install nativerelay==0.3.2`); its native collector currently supports Linux only. See [NativeRelay Integration](docs/native-relay.md) for detailed documentation.
+- **Optional native observations**: NativeRelay `0.4.0` (install separately with `python -m pip install nativerelay==0.4.0`). Linux and Windows collectors are available; see [NativeRelay Integration](docs/native-relay.md) for requirements and limitations.
 
 ---
 
 ## NativeRelay Integration
 
-NativeRelay is an **independent external project** (not an AgentTrace component) that provides Linux kernel-level telemetry via CN_PROC and fanotify. AgentTrace optionally integrates with it for enhanced observability.
+NativeRelay is an **independent external project** (not an AgentTrace component) that provides process-lifecycle and scoped filesystem telemetry. AgentTrace optionally launches it and merges its JSONL observations into the local history.
 
 **Key Points:**
-- **Independently versioned and releasable** — AgentTrace 0.3.x works with NativeRelay `0.3.0 ≤ version < 0.4.0`
-- **Linux only** — Requires root or `CAP_NET_ADMIN` + `CAP_SYS_ADMIN` for full functionality
-- **Optional** — AgentTrace works fully without it using cross-platform polling
-- **Installation**: `pip install nativerelay==0.3.2`
+- **Independently versioned and releasable** — current AgentTrace integration accepts NativeRelay `0.3.0 ≤ version < 0.5.0`; `0.4.0` is the current tested release
+- **Linux and Windows** — Linux uses CN_PROC/fanotify; Windows uses WMI with Toolhelp polling fallback and scoped filesystem notifications
+- **Optional** — AgentTrace works without NativeRelay using its built-in process polling
+- **Installation**: `python -m pip install nativerelay==0.4.0`
 
 **Quick Start:**
 ```bash
-pip install nativerelay==0.3.2
+python -m pip install nativerelay==0.4.0
 agenttrace watch --native-relay
 ```
 
@@ -73,9 +73,9 @@ agenttrace doctor                  # Diagnose installation and compatibility
 |----------|-------------------|-----------------|---------------|------------------------|-------|
 | **Linux** | ✅ Full | ✅ Full | ✅ Polling | ✅ **Full** (CN_PROC + fanotify) | Requires root/CAP_NET_ADMIN for CN_PROC, CAP_SYS_ADMIN for fanotify. Best-effort coverage. |
 | **macOS** | ✅ Full | ✅ Full | ✅ Polling | ❌ Not available | NativeRelay macOS collector not yet implemented. |
-| **Windows** | ✅ Full | ✅ Full | ✅ Polling | ❌ Not available | NativeRelay Windows collector not yet implemented. WSL2: limited (kernel features may be missing). |
+| **Windows** | ✅ Full | ✅ Full | ✅ Polling | ⚠️ Available (degraded status) | NativeRelay 0.4.x supports WMI/Toolhelp process monitoring and scoped filesystem notifications; file-open events are unsupported. |
 
-### NativeRelay Linux Capabilities
+### NativeRelay Capabilities
 
 | Event Type | Linux Status | Requirements | Notes |
 |------------|--------------|--------------|-------|
@@ -126,7 +126,7 @@ cargo run -- watch --native-relay --native-relay-exclude-paths "target/*" --nati
 
 AgentTrace directly launches `nativerelay run --format json --scope <dir> [--include-command] [--include-paths ...] [--exclude-paths ...]`, reads stdout incrementally as JSONL, and captures stderr separately for diagnostics. NativeRelay events and control records are written to AgentTrace history with their original fields preserved (`id`, `timestamp`, `type`, `sequence`, `process`, `resource`, `metadata`, `evidence`, `schema_version`). Control records (`nativerelay.status` with capabilities/health, `nativerelay.loss` with loss generation and ledger) are recorded as first-class events. Reported loss, sequence gaps, malformed records, degraded/unavailable status, and unexpected child exit mark the recording incomplete (`observations_lost_or_incomplete: true` in `session_stopped`). Ctrl+C asks NativeRelay to stop, drains buffered stdout, waits for the child, then records the AgentTrace session stop with a `native_relay` summary object containing final capabilities, health, losses, and collection state. NativeRelay itself is not removed from observed events; AgentTrace's existing detectors do not classify it as a supported AI agent.
 
-Install NativeRelay separately with `pip install nativerelay==0.3.2`; AgentTrace never installs Python packages. On Windows, AgentTrace can locate the user-level Python Scripts executable, but NativeRelay 0.2.0's OS collector is Linux-only, so Windows cannot produce native OS observations. On Linux, process and scoped file observations remain best effort and depend on kernel capabilities and privileges (CN_PROC requires root or CAP_NET_ADMIN; fanotify requires CAP_SYS_ADMIN). `--native-relay` is opt-in during this integration milestone; ordinary `agenttrace run` retains its snapshot behavior.
+Install NativeRelay separately with `python -m pip install nativerelay==0.4.0`; AgentTrace never installs Python packages. On Windows, AgentTrace can locate common per-user Python Scripts locations. NativeRelay 0.4.x provides process monitoring through WMI when available, with Toolhelp polling fallback, plus scoped filesystem notifications. Windows file-open events are unsupported and Toolhelp polling may miss short-lived processes. On Linux, process and scoped file observations remain best effort and depend on kernel capabilities and privileges (CN_PROC requires root or CAP_NET_ADMIN; fanotify requires CAP_SYS_ADMIN). `--native-relay` remains opt-in.
 
 Record and stream process-observation events until Ctrl+C, then inspect the JSONL history:
 
