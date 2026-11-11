@@ -1078,19 +1078,29 @@ mod tests {
     }
 
     #[test]
-    fn discover_nativerelay_returns_unavailable_on_non_linux() {
-        // On non-Linux platforms, discover_nativerelay should return Unavailable platform support
+    fn discover_nativerelay_reports_non_linux_platform_support() {
+        // NativeRelay can be installed and version-compatible on Windows even though
+        // its collectors provide degraded rather than full platform support.
         #[cfg(not(target_os = "linux"))]
         {
             let info = discover_nativerelay();
-            assert_eq!(info.compatibility, CompatibilityStatus::Unavailable);
             #[cfg(target_os = "windows")]
             assert_eq!(info.platform_support, PlatformSupport::Degraded);
             #[cfg(not(target_os = "windows"))]
             assert_eq!(info.platform_support, PlatformSupport::Unavailable);
-            // Note: can_start depends on whether there's a nativerelay executable in PATH
-            // which can vary by environment, so we don't assert on it
-            assert!(info.executable_path.is_none() || info.version.is_none());
+
+            // Discovery depends on the host environment: CI may install NativeRelay,
+            // while a developer machine may not have it. Compatibility should reflect
+            // the discovered version when present, and remain Unavailable otherwise.
+            match info.version.as_ref() {
+                Some(version) => {
+                    assert_eq!(info.compatibility, version.compatibility_status());
+                    assert!(info.executable_path.is_some());
+                }
+                None => {
+                    assert_eq!(info.compatibility, CompatibilityStatus::Unavailable);
+                }
+            }
         }
     }
 
