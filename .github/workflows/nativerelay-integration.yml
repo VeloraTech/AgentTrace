@@ -22,21 +22,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install pinned NativeRelay beta wheel
+      - name: Install NativeRelay 0.4.0 from PyPI
         shell: pwsh
         run: |
-          $wheel = "nativerelay-0.4.0b1-py3-none-any.whl"
-          $url = "https://github.com/VeloraTech/NativeRelay/releases/download/v0.4.0b1/$wheel"
-          $destination = Join-Path $env:RUNNER_TEMP $wheel
-          Invoke-WebRequest -Uri $url -OutFile $destination
-          $expected = "62e9db9469e1e8eb32f3aaea7c5dd1d4d98065152b95d3f78ad3e4d62b40672c"
-          $actual = (Get-FileHash -Algorithm SHA256 $destination).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw "NativeRelay wheel SHA256 mismatch: $actual" }
-          python -m pip install --disable-pip-version-check --no-deps $destination
+          python -m pip install --disable-pip-version-check "nativerelay==0.4.0"
           $scripts = python -c "import sysconfig; print(sysconfig.get_path('scripts'))"
           Add-Content $env:GITHUB_PATH $scripts
           $installed = python -c "from importlib.metadata import version; print(version('nativerelay'))"
-          if ($installed -ne "0.4.0b1") { throw "Unexpected NativeRelay version: $installed" }
+          if ($installed -ne "0.4.0") { throw "Unexpected NativeRelay version: $installed" }
           if (-not (Test-Path (Join-Path $scripts "nativerelay.exe"))) { throw "nativerelay.exe missing from Python Scripts directory" }
 
       - uses: dtolnay/rust-toolchain@stable
