@@ -123,7 +123,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          printf 'AgentTrace %s\n\n- Native binaries for Windows, macOS, and Linux (x64 and ARM64).\n- SHA-256 checksums and the npm package tarball are attached.\n' "$GITHUB_REF_NAME" > dist/release-notes.md
+          notes_file="docs/releases/$GITHUB_REF_NAME.md"
+          if [ -f "$notes_file" ]; then
+            cp "$notes_file" dist/release-notes.md
+          else
+            printf 'AgentTrace %s\n\n- Native binaries for Windows, macOS, and Linux (x64 and ARM64).\n- SHA-256 checksums and the npm package tarball are attached.\n' "$GITHUB_REF_NAME" > dist/release-notes.md
+          fi
           if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" --verify-tag --notes-file dist/release-notes.md --title "AgentTrace $GITHUB_REF_NAME"
           fi
